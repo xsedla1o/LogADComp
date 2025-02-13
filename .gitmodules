@@ -1,0 +1,6 @@
+[submodule "loglizer"]
+	path = loglizer
+	url = git@github.com:xsedla1o/loglizer.git
+[submodule "sempca"]
+	path = sempca
+	url = git@github.com:xsedla1o/SemPCA.git

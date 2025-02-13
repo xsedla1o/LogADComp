@@ -1,0 +1,2 @@
+-r loglizer/requirements.txt
+-r sempca/requirements.txt
