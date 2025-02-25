@@ -4,3 +4,6 @@
 [submodule "sempca"]
 	path = sempca
 	url = git@github.com:xsedla1o/SemPCA.git
+[submodule "logbert"]
+	path = logbert
+	url = git@github.com:xsedla1o/logbert
