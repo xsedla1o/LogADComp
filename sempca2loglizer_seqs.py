@@ -25,7 +25,7 @@ settings = {
         "parser_config": os.path.join(PROJECT_ROOT, "conf/BGL.ini"),
         "parser_persistence": os.path.join(PROJECT_ROOT, "datasets/BGL/persistences"),
         "csv_out": "data/BGL.seqs.csv",
-    }
+    },
 }
 
 if __name__ == "__main__":
@@ -34,7 +34,8 @@ if __name__ == "__main__":
         "dataset",
         default="HDFS",
         choices=["HDFS", "BGL"],
-        type=str, help="Target dataset. Default HDFS",
+        type=str,
+        help="Target dataset. Default HDFS",
     )
     args = parser.parse_args()
 
@@ -48,10 +49,12 @@ if __name__ == "__main__":
 
     encode = "utf-8"
 
-    dataloader.parse_by_IBM(config_file=s["parser_config"],
-                            persistence_folder=s["parser_persistence"],
-                            encode=encode,
-                            core_jobs=os.cpu_count() // 2)
+    dataloader.parse_by_IBM(
+        config_file=s["parser_config"],
+        persistence_folder=s["parser_persistence"],
+        encode=encode,
+        core_jobs=os.cpu_count() // 2,
+    )
 
     # Drop malformed template
     m_id = None
@@ -62,17 +65,12 @@ if __name__ == "__main__":
 
     with (
         open(dataloader.in_file, "r", encoding=encode) as in_f,
-        open(s["csv_out"], "w", encoding=encode) as out_f
+        open(s["csv_out"], "w", encoding=encode) as out_f,
     ):
         writer = csv.writer(
-            out_f,
-            delimiter=",",
-            quotechar='"',
-            quoting=csv.QUOTE_MINIMAL
+            out_f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
         )
-        writer.writerow(
-            ("BlockId", "Label", "EventSequence")
-        )
+        writer.writerow(("BlockId", "Label", "EventSequence"))
 
         for block, sequence in dataloader.block2eventseq.items():
             seq = " ".join(str(x) for x in sequence if x != m_id)
