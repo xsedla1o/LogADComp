@@ -3,15 +3,15 @@ LineId,Date,Time,Pid,Level,Component,Content,EventId,EventTemplate
 
 """
 
-import csv
-import sys
-
-sys.path.extend(["sempca", "sempca/preprocessing"])
-
-from sempca.preprocessing.dataloader.HDFSLoader import HDFSLoader
-
-from sempca.CONSTANTS import *
 import argparse
+import csv
+import os
+
+import numpy as np
+
+from sempca.const import PROJECT_ROOT
+from sempca.preprocessing import HDFSLoader
+from sempca.utils import tqdm
 
 
 def generate_inputs_and_labels(insts, label2idx):

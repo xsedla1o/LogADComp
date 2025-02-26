@@ -1,13 +1,9 @@
+import argparse
 import csv
-import sys
+import os
 
-sys.path.insert(0, "sempca/preprocessing")
-sys.path.insert(0, "sempca")
-
-from sempca.preprocessing.dataloader.BGLLoader import BGLLoader
-from sempca.preprocessing.dataloader.HDFSLoader import HDFSLoader
-
-from sempca.CONSTANTS import *
+from sempca.const import PROJECT_ROOT
+from sempca.preprocessing import HDFSLoader, BGLLoader
 
 settings = {
     "HDFS": {

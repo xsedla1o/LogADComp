@@ -2,7 +2,7 @@
 	path = loglizer
 	url = git@github.com:xsedla1o/loglizer.git
 [submodule "sempca"]
-	path = sempca
+	path = sempca.d
 	url = git@github.com:xsedla1o/SemPCA.git
 [submodule "logbert"]
 	path = logbert
