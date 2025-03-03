@@ -3,7 +3,7 @@ import csv
 import os
 
 from sempca.const import PROJECT_ROOT
-from sempca.preprocessing import HDFSLoader, BGLLoader
+from sempca.preprocessing import HDFSLoader, BGLLoader, DataPaths
 
 settings = {
     "HDFS": {
@@ -38,17 +38,14 @@ if __name__ == "__main__":
     dataset = args.dataset
     s = settings[dataset]
 
+    paths = DataPaths(dataset_name=dataset)
+
     dataloader = s["dataloader"](
-        in_file=s["in_file"],
+        paths=paths,
         semantic_repr_func=None,
     )
 
-    encode = "utf-8"
-
-    dataloader.parse_by_IBM(
-        config_file=s["parser_config"],
-        persistence_folder=s["parser_persistence"],
-        encode=encode,
+    dataloader.parse_by_drain(
         core_jobs=os.cpu_count() // 2,
     )
 
@@ -59,10 +56,7 @@ if __name__ == "__main__":
             m_id = t_id
             break
 
-    with (
-        open(dataloader.in_file, "r", encoding=encode) as in_f,
-        open(s["csv_out"], "w", encoding=encode) as out_f,
-    ):
+    with open(s["csv_out"], "w") as out_f:
         writer = csv.writer(
             out_f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
         )
