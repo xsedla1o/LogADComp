@@ -34,11 +34,11 @@ class Timed(ContextManager):
         self.start = None
         self.end = None
 
-    def __enter__(self):
+    def go(self):
         self.start = time()
         return self
 
-    def __exit__(self, *args):
+    def stop(self):
         self.end = time()
         if self.print:
             seconds = self.end - self.start
@@ -48,4 +48,10 @@ class Timed(ContextManager):
                 print(f"{self.label}: {int(seconds / 60)}m {seconds % 60:.2f}s ")
         else:
             self.output_dict[self.label] = self.end - self.start
+
+    def __enter__(self):
+        return self.go()
+
+    def __exit__(self, *args):
+        self.stop()
         return False
