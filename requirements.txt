@@ -1,2 +1,6 @@
+-r logbert/environment/requirements.txt
 -r loglizer/requirements.txt
--r sempca/requirements.txt
+-r sempca.d/requirements.txt
+-e sempca.d
+optuna==4.2.1
+tomli==2.2.1
