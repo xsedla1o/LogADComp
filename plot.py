@@ -9,7 +9,8 @@ if __name__ == "__main__":
         dir_config = tomli.load(f)
 
     d_name = "HDFS"
-    model = "SVM"
+    # model = "SVM"
+    model = "SemPCA"
     n_trials = 20
     train_ratio = 0.5
     dataset_dir = dir_config["datasets"]
@@ -39,11 +40,12 @@ if __name__ == "__main__":
     metrics_df = pd.concat(dfs).reset_index().drop(columns="index")
 
     data = metrics_df[metrics_df["split"] == "test"][["f1"]]
-    labels = ["SVM"]
+    labels = [model]
     fig, ax = plt.subplots()
     ax.set_ylabel("F1-score")
     ax.boxplot(data, tick_labels=labels)
     plt.savefig(f"{config_dict['output_dir']}/f1.png")
 
     data = metrics_df[metrics_df["split"] == "test"][["precision", "recall", "f1"]]
-    print(data.describe())
+    print(data)
+    print(data.describe().drop("count"))

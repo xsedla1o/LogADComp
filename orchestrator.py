@@ -3,15 +3,16 @@ import gc
 import json
 import os
 
+import numpy as np
 import optuna
 import pandas as pd
 import tomli
 
-from loglizer.loglizer import preprocessing
-from loglizer.loglizer.dataloader import load_HDFS
-from loglizer.loglizer.models import SVM
+from sklearn.preprocessing import StandardScaler
+from loglizer.loglizer.dataloader import _split_data
+from sempca.models import PCAPlusPlus
 from sempca.preprocessing import DataPaths, Preprocessor
-from sempca.representations import TemplateTfIdf
+from sempca.representations import TemplateTfIdf, SequentialAdd
 from utils import Timed
 
 pd.options.display.max_columns = None
@@ -77,9 +78,11 @@ if __name__ == "__main__":
         dir_config = tomli.load(f)
 
     d_name = "HDFS"
-    model = "SVM"
-    n_trials = 20
+    # model = "SVM"
+    model = "SemPCA"
+    n_trials = 100
     train_ratio = 0.5
+    val_ratio = 0.1
     dataset_dir = dir_config["datasets"]
     output_dir = f"{dir_config['outputs']}/{d_name}_{train_ratio}/{model}"
 
@@ -90,6 +93,7 @@ if __name__ == "__main__":
         "processed_labels": f"{dataset_dir}/{d_name}/label.csv",
         "embeddings": f"{dataset_dir}/glove.6B.300d.txt",
         "loglizer_seqs": f"{dataset_dir}/{d_name}/{d_name}.seqs.csv",
+        "sempca_sem_npz": f"{dataset_dir}/{d_name}/{d_name}.sempca.sem.npz",
         "output_dir": output_dir,
         "trials_output": f"{output_dir}/trials.csv",
         "hyperparameters": f"{output_dir}/hyperparameters.json",
@@ -133,18 +137,55 @@ if __name__ == "__main__":
         del preprocessor, t_encoder, dataloader
         gc.collect()
 
+    if exists_and_not_empty(config_dict["sempca_sem_npz"]):
+        print("Semantic representations and labels already processed")
+        loaded = np.load(config_dict["sempca_sem_npz"])
+        xs = loaded["xs"]
+        ys = loaded["ys"]
+    else:
+        preprocessor = Preprocessor()
+        t_encoder = TemplateTfIdf()
+        dataloader = preprocessor.get_dataloader("HDFS")(
+            paths=paths, semantic_repr_func=t_encoder.present
+        )
+
+        dataloader.parse_by_drain(core_jobs=min(os.cpu_count() // 2, 8))
+
+        # Drop malformed template
+        m_id = None
+        for t_id, template in dataloader.templates.items():
+            if template == "such file or directory":
+                m_id = t_id
+                break
+
+        instances = preprocessor.generate_instances(dataloader,
+                                                    drop_ids={m_id})
+        ys = np.asarray(
+            [int(preprocessor.label2id[inst.label]) for inst in instances], dtype=int
+        )
+
+        seqential_encoder = SequentialAdd(preprocessor.embedding)
+        xs = seqential_encoder.transform(instances)
+
+        np.savez_compressed(config_dict["sempca_sem_npz"], xs=xs, ys=ys)
+
+        del preprocessor, t_encoder, dataloader
+        gc.collect()
+
     if all(exists_and_not_empty(config_dict[x]) for x in ["trials_output", "hyperparameters"]):
         print("Found hyperparameters and trials output")
         with open(config_dict["hyperparameters"], "r") as in_f:
             best_params = json.load(in_f)
     else:
-        with Timed("Data loaded"):
-            (x_train, y_train), (x_val, y_val), (x_test, y_test) = load_HDFS(
-                config_dict["loglizer_seqs"],
-                window="session",
-                train_ratio=train_ratio,
-                split_type="sequential_validation",
-            )
+        (x_train, y_train), (x_val, y_val), (x_test, y_test) = _split_data(
+            xs, ys, train_ratio=train_ratio, split_type="sequential_validation",
+            val_ratio=val_ratio
+        )
+
+        scaler = StandardScaler()
+        x_train = scaler.fit_transform(x_train)
+        x_val = scaler.transform(x_val)
+        x_test = scaler.transform(x_test)
 
         num_train = x_train.shape[0]
         num_val = x_val.shape[0]
@@ -159,33 +200,24 @@ if __name__ == "__main__":
         print(f"Test:  {num_test:10d} ({num_test_pos:10d})")
         print(f"Total: {num_total:10d} ({num_pos:10d})")
 
-        feature_extractor = preprocessing.FeatureExtractor()
-        with Timed("Fit feature extractor and transform data"):
-            x_train = feature_extractor.fit_transform(x_train, term_weighting="tf-idf")
-            x_val = feature_extractor.transform(x_val)
-            x_test = feature_extractor.transform(x_test)
 
-
-        # Hyperparameter tuning
-        def objective(trial: optuna.Trial):
-            model = SVM(
-                penalty=trial.suggest_categorical("penalty", ["l1", "l2"]),
-                tol=trial.suggest_float("tol", 1e-4, 1e-1, log=True),
-                C=trial.suggest_float("C", 1e-3, 1e3, log=True),
-                class_weight=trial.suggest_categorical(
-                    "class_weight", [None, "balanced"]
-                ),
-                max_iter=trial.suggest_int("max_iter", 100, 1000, step=100),
-                dual=False,
+        def objective_PCA(trial: optuna.Trial):
+            # Getting a fixed threshold to work for all splits is hard,
+            # maybe relying on Q statistics with a learned multiplier is better
+            # threshold_mult = trial.suggest_float("threshold_mult", 0.1, 2.0)
+            model = PCAPlusPlus(
+                # n_components=trial.suggest_int("n_components", 1, x_train.shape[1] // 10, log=True),
+                n_components=trial.suggest_float("n_components", 0.8, 1 - 1e-9),
+                c_alpha=3.8906,
             )
-            model.fit(x_train, y_train)
+            model.fit(x_train)
+            # model.threshold *= threshold_mult
             _precision, _recall, f1 = model.evaluate(x_val, y_val)
             return f1
 
-
         study = optuna.create_study(direction="maximize")
         with Timed("Optimize hyperparameters"):
-            study.optimize(objective, n_trials=n_trials)
+            study.optimize(objective_PCA, n_trials=n_trials)
 
         print(study.trials_dataframe(attrs=("number", "value", "params", "state")))
         print("Best params", study.best_params)
@@ -201,6 +233,67 @@ if __name__ == "__main__":
         del x_train, y_train, x_val, y_val, x_test, y_test
         gc.collect()
 
+        # with Timed("Data loaded"):
+        #     (x_train, y_train), (x_val, y_val), (x_test, y_test) = load_HDFS(
+        #         config_dict["loglizer_seqs"],
+        #         window="session",
+        #         train_ratio=train_ratio,
+        #         split_type="sequential_validation",
+        #     )
+        #
+        # num_train = x_train.shape[0]
+        # num_val = x_val.shape[0]
+        # num_test = x_test.shape[0]
+        # num_total = num_train + num_test + num_val
+        # num_train_pos = sum(y_train)
+        # num_val_pos = sum(y_val)
+        # num_test_pos = sum(y_test)
+        # num_pos = num_train_pos + num_test_pos + num_val_pos
+        # print(f"Train: {num_train:10d} ({num_train_pos:10d})")
+        # print(f"Val:   {num_val:10d} ({num_val_pos:10d})")
+        # print(f"Test:  {num_test:10d} ({num_test_pos:10d})")
+        # print(f"Total: {num_total:10d} ({num_pos:10d})")
+        #
+        # feature_extractor = preprocessing.FeatureExtractor()
+        # with Timed("Fit feature extractor and transform data"):
+        #     x_train = feature_extractor.fit_transform(x_train, term_weighting="tf-idf")
+        #     x_val = feature_extractor.transform(x_val)
+        #     x_test = feature_extractor.transform(x_test)
+        #
+        # # Hyperparameter tuning
+        # def objective(trial: optuna.Trial):
+        #     model = SVM(
+        #         penalty=trial.suggest_categorical("penalty", ["l1", "l2"]),
+        #         tol=trial.suggest_float("tol", 1e-4, 1e-1, log=True),
+        #         C=trial.suggest_float("C", 1e-3, 1e3, log=True),
+        #         class_weight=trial.suggest_categorical(
+        #             "class_weight", [None, "balanced"]
+        #         ),
+        #         max_iter=trial.suggest_int("max_iter", 100, 1000, step=100),
+        #         dual=False,
+        #     )
+        #     model.fit(x_train, y_train)
+        #     _precision, _recall, f1 = model.evaluate(x_val, y_val)
+        #     return f1
+        #
+        # study = optuna.create_study(direction="maximize")
+        # with Timed("Optimize hyperparameters"):
+        #     study.optimize(objective, n_trials=n_trials)
+        #
+        # print(study.trials_dataframe(attrs=("number", "value", "params", "state")))
+        # print("Best params", study.best_params)
+        # print("Best F1 value", study.best_value)
+        #
+        # os.makedirs(config_dict["output_dir"], exist_ok=True)
+        # study.trials_dataframe().to_csv(config_dict["trials_output"])
+        # with open(config_dict["hyperparameters"], "w") as out_f:
+        #     json.dump(study.best_params, out_f)
+        #
+        # best_params = study.best_params
+        #
+        # del x_train, y_train, x_val, y_val, x_test, y_test
+        # gc.collect()
+
     # Float offsets from 0.0 to 0.9 in steps of 0.1
     for offset in range(0, 10):
         offset /= 10
@@ -211,27 +304,54 @@ if __name__ == "__main__":
         else:
             print(f"Evaluating split with offset {offset}")
 
-        (x_train, y_train), (x_val, y_val), (x_test, y_test) = load_HDFS(
-            config_dict["loglizer_seqs"],
-            window="session",
-            train_ratio=train_ratio,
-            split_type="sequential_validation",
-            offset=offset,
+        (x_train, y_train), (x_val, y_val), (x_test, y_test) = _split_data(
+            xs, ys, train_ratio=train_ratio, split_type="sequential_validation",
+            offset=offset
         )
 
-        feature_extractor = preprocessing.FeatureExtractor()
-        with Timed("Fit feature extractor and transform data"):
-            x_train = feature_extractor.fit_transform(x_train, term_weighting="tf-idf")
-            x_val = feature_extractor.transform(x_val)
-            x_test = feature_extractor.transform(x_test)
+        scaler = StandardScaler()
+        x_train = scaler.fit_transform(x_train)
+        x_val = scaler.transform(x_val)
+        x_test = scaler.transform(x_test)
 
-        model = SVM(
-            **best_params,
-            dual=False,
+        num_train = x_train.shape[0]
+        num_val = x_val.shape[0]
+        num_test = x_test.shape[0]
+        num_total = num_train + num_test + num_val
+        num_train_pos = sum(y_train)
+        num_val_pos = sum(y_val)
+        num_test_pos = sum(y_test)
+        num_pos = num_train_pos + num_test_pos + num_val_pos
+        print(f"Train: {num_train:10d} ({num_train_pos:10d})")
+        print(f"Val:   {num_val:10d} ({num_val_pos:10d})")
+        print(f"Test:  {num_test:10d} ({num_test_pos:10d})")
+        print(f"Total: {num_total:10d} ({num_pos:10d})")
+
+        # (x_train, y_train), (x_val, y_val), (x_test, y_test) = load_HDFS(
+        #     config_dict["loglizer_seqs"],
+        #     window="session",
+        #     train_ratio=train_ratio,
+        #     split_type="sequential_validation",
+        #     offset=offset,
+        # )
+        #
+        # feature_extractor = preprocessing.FeatureExtractor()
+        # with Timed("Fit feature extractor and transform data"):
+        #     x_train = feature_extractor.fit_transform(x_train, term_weighting="tf-idf")
+        #     x_val = feature_extractor.transform(x_val)
+        #     x_test = feature_extractor.transform(x_test)
+        #
+        # model = SVM(
+        #     **best_params,
+        #     dual=False,
+        # )
+
+        model = PCAPlusPlus(
+            n_components=best_params["n_components"],
         )
 
         with Timed("Fit model"):
-            model.fit(x_train, y_train)
+            model.fit(x_train)
 
         metrics = []
 
