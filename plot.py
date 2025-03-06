@@ -1,17 +1,28 @@
+import argparse
 import os.path
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import tomli
 
+from adapters import model_adapters
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "model",
+        type=str,
+        help="Model to use for anomaly detection, choices: "
+        + ", ".join(model_adapters),
+    )
+    args = parser.parse_args()
+
     with open("paths.toml", "rb") as f:
         dir_config = tomli.load(f)
 
     d_name = "HDFS"
-    # model = "SVM"
-    model = "SemPCA"
-    n_trials = 20
+    model = args.model
+
     train_ratio = 0.5
     dataset_dir = dir_config["datasets"]
     output_dir = f"{dir_config['outputs']}/{d_name}_{train_ratio}/{model}"
@@ -46,6 +57,6 @@ if __name__ == "__main__":
     ax.boxplot(data, tick_labels=labels)
     plt.savefig(f"{config_dict['output_dir']}/f1.png")
 
-    data = metrics_df[metrics_df["split"] == "test"][["precision", "recall", "f1"]]
+    data = metrics_df[metrics_df["split"] == "test"]
     print(data)
     print(data.describe().drop("count"))
