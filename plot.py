@@ -6,9 +6,15 @@ import pandas as pd
 import tomli
 
 from adapters import model_adapters
+from dataloader import dataloaders
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "dataset",
+        type=str,
+        help="Dataset to use for anomaly detection, choices: " + ", ".join(dataloaders),
+    )
     parser.add_argument(
         "model",
         type=str,
@@ -20,7 +26,7 @@ if __name__ == "__main__":
     with open("paths.toml", "rb") as f:
         dir_config = tomli.load(f)
 
-    d_name = "HDFS"
+    d_name = args.dataset
     model = args.model
 
     train_ratio = 0.5
@@ -54,6 +60,7 @@ if __name__ == "__main__":
     labels = [model]
     fig, ax = plt.subplots()
     ax.set_ylabel("F1-score")
+    ax.set_ylim(0, 1)
     ax.boxplot(data, tick_labels=labels)
     plt.savefig(f"{config_dict['output_dir']}/f1.png")
 

@@ -9,6 +9,7 @@ import pandas as pd
 import tomli
 
 from adapters import model_adapters
+from dataloader import dataloaders
 from sempca.preprocessing import DataPaths
 from utils import Timed, calculate_metrics
 
@@ -64,6 +65,11 @@ def get_embeddings(config: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "dataset",
+        type=str,
+        help="Dataset to use for anomaly detection, choices: " + ", ".join(dataloaders),
+    )
+    parser.add_argument(
         "model",
         type=str,
         help="Model to use for anomaly detection, choices: "
@@ -74,7 +80,7 @@ if __name__ == "__main__":
     with open("paths.toml", "rb") as f:
         dir_config = tomli.load(f)
 
-    d_name = "HDFS"
+    d_name = args.dataset
     model_name = args.model
     n_trials = 100
     train_ratio = 0.5
@@ -89,27 +95,28 @@ if __name__ == "__main__":
         "processed_labels": f"{dataset_dir}/{d_name}/label.csv",
         "embeddings": f"{dataset_dir}/glove.6B.300d.txt",
         "loglizer_seqs": f"{dataset_dir}/{d_name}/{d_name}.seqs.csv",
-        "sempca_sem_npz": f"{dataset_dir}/{d_name}/{d_name}.sempca.sem.npz",
+        "word_vec_npz": f"{dataset_dir}/{d_name}/{d_name}.word_vec.npz",
+        "ecv_npz": f"{dataset_dir}/{d_name}/{d_name}.ecv.npz",
         "output_dir": output_dir,
         "trials_output": f"{output_dir}/trials.csv",
         "hyperparameters": f"{output_dir}/hyperparameters.json",
     }
 
-    get_HDFS(config_dict)
-    get_embeddings(config_dict)
-
     # get abspath of this script
     root_dir = os.path.dirname(os.path.abspath(__file__))
     paths = DataPaths(
-        dataset_name="HDFS",
+        dataset_name=d_name,
         project_root=root_dir,
-        dataset_dir=f"{config_dict['dataset_dir']}/HDFS",
+        dataset_dir=f"{config_dict['dataset_dir']}/{d_name}",
         label_file=config_dict["processed_labels"],
     )
     print(paths)
 
-    model = model_adapters[model_name](config_dict, paths)
-    model.data_preprocessing()
+    dataloader = dataloaders[d_name](config_dict, paths)
+    dataloader.get()
+
+    model = model_adapters[model_name]()
+    xs, ys = model.transform_representation(dataloader)
 
     if all(
         exists_and_not_empty(config_dict[x])
@@ -120,22 +127,9 @@ if __name__ == "__main__":
             best_params = json.load(in_f)
     else:
         with Timed("Data loaded"):
-            (x_train, y_train), (x_val, y_val), (x_test, y_test) = model.load_split(
-                train_ratio=train_ratio, val_ratio=val_ratio, offset=0.0
+            (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
+                xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=0.0
             )
-
-        num_train = x_train.shape[0]
-        num_val = x_val.shape[0]
-        num_test = x_test.shape[0]
-        num_total = num_train + num_test + num_val
-        num_train_pos = sum(y_train)
-        num_val_pos = sum(y_val)
-        num_test_pos = sum(y_test)
-        num_pos = num_train_pos + num_test_pos + num_val_pos
-        print(f"Train: {num_train:10d} ({num_train_pos:10d})")
-        print(f"Val:   {num_val:10d} ({num_val_pos:10d})")
-        print(f"Test:  {num_test:10d} ({num_test_pos:10d})")
-        print(f"Total: {num_total:10d} ({num_pos:10d})")
 
         with Timed("Fit feature extractor and transform data"):
             x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
@@ -173,8 +167,8 @@ if __name__ == "__main__":
         else:
             print(f"Evaluating split with offset {offset}")
 
-        (x_train, y_train), (x_val, y_val), (x_test, y_test) = model.load_split(
-            train_ratio=train_ratio, val_ratio=val_ratio, offset=offset
+        (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
+            xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=offset
         )
 
         with Timed("Fit feature extractor and transform data"):
