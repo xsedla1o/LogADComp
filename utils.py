@@ -82,7 +82,7 @@ def calculate_metrics(y_true, y_pred) -> Dict[str, Union[int, float]]:
 
     precision = TP / (TP + FP + 1e-8)
     recall = TP / (TP + FN + 1e-8)
-    f1 = 2 * precision * recall / (precision + recall)
+    f1 = 2 * precision * recall / (precision + recall + 1e-8)
     tnr = TN / (TN + FP + 1e-8)
     acc = (TP + TN) / (TP + TN + FP + FN + 1e-8)
 
