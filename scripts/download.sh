@@ -14,7 +14,7 @@ DOWNLOAD_DIR=$(realpath "$2")
 
 # Download HDFS if requested
 if [ "$ITEM" == "HDFS" ]; then
-    parent_path="${DOWNLOAD_DIR}/HDFS/"
+    parent_path="${DOWNLOAD_DIR}/${ITEM}/"
     mkdir -p "$parent_path"
     cd "$parent_path" || { echo "Failed to cd into $parent_path"; exit 1; }
 
@@ -31,7 +31,7 @@ if [ "$ITEM" == "HDFS" ]; then
     tar -xvzf "$zipfile" anomaly_label.csv
     rm "$zipfile"
 elif [ "$ITEM" == "BGL" ]; then
-    parent_path="${DOWNLOAD_DIR}/HDFS/"
+    parent_path="${DOWNLOAD_DIR}/${ITEM}/"
     mkdir -p "$parent_path"
     cd "$parent_path" || { echo "Failed to cd into $parent_path"; exit 1; }
 
