@@ -1,22 +1,12 @@
-import csv
-import os
 from abc import abstractmethod, ABC
 from typing import Union, Type, Dict, Tuple
 
 import optuna
 
 from dataloader import NdArr, DataLoader
-from loglizer.loglizer.models import SVM
+from loglizer.loglizer.models import SVM, LogClustering
 from preprocess import Normalizer
-from sempca.models import PCAPlusPlus
-
-
-def exists_and_not_empty(file_path: str) -> bool:
-    return (
-        os.path.exists(file_path)
-        and os.path.isfile(file_path)
-        and os.path.getsize(file_path) > 0
-    )
+from sempca.models import PCAPlusPlus, PCA
 
 
 class LogADCompAdapter(ABC):
@@ -53,11 +43,63 @@ class LogADCompAdapter(ABC):
         return self._model.predict(x_test)
 
 
-class SemPCAAdapter(LogADCompAdapter):
+class PCAAdapter(LogADCompAdapter):
     def __init__(self):
         super().__init__()
-        self.xs = None
-        self.ys = None
+        self._model = PCA()
+        self.threshold_mult = 1.0
+
+    @staticmethod
+    def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
+        return loader.get_ecv_representation()
+
+    @staticmethod
+    def preprocess_split(
+        x_train: NdArr, x_val: NdArr, x_test: NdArr
+    ) -> Tuple[NdArr, NdArr, NdArr]:
+        norm = Normalizer(term_weighting="tf-idf", normalization="zero-mean")
+        x_train = norm.fit_transform(x_train)
+        x_val = norm.transform(x_val)
+        x_test = norm.transform(x_test)
+        return x_train, x_val, x_test
+
+    @staticmethod
+    def get_trial_objective(x_train, y_train, x_val, y_val):
+        def objective(trial: optuna.Trial):
+            threshold_mult = trial.suggest_float("threshold_mult", 0.1, 2.0)
+            model = PCA(
+                n_components=trial.suggest_int(
+                    "n_components", 1, x_train.shape[1] // 10, log=True
+                ),
+                c_alpha=trial.suggest_categorical("c_alpha", [3.8906]),
+            )
+            model.fit(x_train)
+            model.threshold *= threshold_mult
+            _precision, _recall, f1 = model.evaluate(x_val, y_val)
+            return f1
+
+        return objective
+
+    def set_params(
+        self,
+        n_components: Union[int, float] = 0.95,
+        c_alpha: float = 3.2905,
+        threshold: float = None,
+        threshold_mult: float = 1.0,
+    ):
+        self._model = PCA(
+            n_components=n_components, threshold=threshold, c_alpha=c_alpha
+        )
+        self.threshold_mult = threshold_mult
+
+    def fit(self, x_train, _y_train=None):
+        self._model.fit(x_train)
+        self._model.threshold *= self.threshold_mult
+
+
+class SemPCAAdapter(PCAAdapter):
+    def __init__(self):
+        super().__init__()
         self._model = PCAPlusPlus()
         self.threshold_mult = 1.0
 
@@ -101,10 +143,6 @@ class SemPCAAdapter(LogADCompAdapter):
             n_components=n_components, c_alpha=c_alpha, threshold=threshold
         )
         self.threshold_mult = threshold_mult
-
-    def fit(self, x_train, _y_train=None):
-        self._model.fit(x_train)
-        self._model.threshold *= self.threshold_mult
 
 
 class SVMAdapter(LogADCompAdapter):
@@ -161,7 +199,53 @@ class SVMAdapter(LogADCompAdapter):
         self._model.fit(x_train, y_train)
 
 
+class LogClusterAdapter(LogADCompAdapter):
+    def __init__(self):
+        super().__init__()
+        self._model = LogClustering()
+
+    @staticmethod
+    def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
+        return loader.get_ecv_representation()
+
+    @staticmethod
+    def preprocess_split(
+        x_train: NdArr, x_val: NdArr, x_test: NdArr
+    ) -> Tuple[NdArr, NdArr, NdArr]:
+        return x_train, x_val, x_test
+
+    @staticmethod
+    def get_trial_objective(x_train, y_train, x_val, y_val):
+        def objective(trial: optuna.Trial):
+            model = LogClustering(
+                max_dist=trial.suggest_float("max_dist", 0.3, 0.8),
+                anomaly_threshold=trial.suggest_float("anomaly_threshold", 0.3, 0.9),
+                num_bootstrap_samples=trial.suggest_int(
+                    "num_bootstrap_samples", 500, 5000, step=500
+                ),
+            )
+            model.fit(x_train[y_train == 0, :])
+            _precision, _recall, f1 = model.evaluate(x_val, y_val)
+            return f1
+
+        return objective
+
+    def set_params(
+        self, max_dist=0.3, anomaly_threshold=0.3, num_bootstrap_samples=1000
+    ):
+        self._model = LogClustering(
+            max_dist=max_dist,
+            anomaly_threshold=anomaly_threshold,
+            num_bootstrap_samples=num_bootstrap_samples,
+        )
+
+    def fit(self, x_train, y_train):
+        self._model.fit(x_train[y_train == 0, :])
+
+
 model_adapters: Dict[str, Type[LogADCompAdapter]] = {
+    "PCA": PCAAdapter,
     "SemPCA": SemPCAAdapter,
     "SVM": SVMAdapter,
+    "LogCluster": LogClusterAdapter,
 }

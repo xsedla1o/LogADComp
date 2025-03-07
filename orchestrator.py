@@ -75,6 +75,24 @@ if __name__ == "__main__":
         help="Model to use for anomaly detection, choices: "
         + ", ".join(model_adapters),
     )
+    parser.add_argument(
+        "--n_trials",
+        type=int,
+        default=100,
+        help="Number of trials for hyperparameter optimization",
+    )
+    parser.add_argument(
+        "--train_ratio",
+        type=float,
+        default=0.5,
+        help="Ratio of training data to use",
+    )
+    parser.add_argument(
+        "--val_ratio",
+        type=float,
+        default=0.1,
+        help="Ratio of validation data to use",
+    )
     args = parser.parse_args()
 
     with open("paths.toml", "rb") as f:
@@ -82,9 +100,9 @@ if __name__ == "__main__":
 
     d_name = args.dataset
     model_name = args.model
-    n_trials = 100
-    train_ratio = 0.5
-    val_ratio = 0.1
+    n_trials = args.n_trials
+    train_ratio = args.train_ratio
+    val_ratio = args.val_ratio
     dataset_dir = dir_config["datasets"]
     output_dir = f"{dir_config['outputs']}/{d_name}_{train_ratio}/{model_name}"
 

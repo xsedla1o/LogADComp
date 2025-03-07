@@ -8,7 +8,6 @@ from typing import Tuple, Union, List, Callable, Dict, Type
 
 import numpy as np
 
-from adapters import exists_and_not_empty
 from preprocess import EventCounter
 from sempca.preprocessing import DataPaths, Preprocessor, BasicDataLoader, BGLLoader
 from sempca.representations import SequentialAdd, TemplateTfIdf
@@ -16,6 +15,14 @@ from sempca.utils import get_logger
 
 NdArr = np.ndarray
 NdArrPair = Tuple[np.ndarray, np.ndarray]
+
+
+def exists_and_not_empty(file_path: str) -> bool:
+    return (
+        os.path.exists(file_path)
+        and os.path.isfile(file_path)
+        and os.path.getsize(file_path) > 0
+    )
 
 
 def skip_when_present(key: Union[str, List[str]], load: Callable = None):
