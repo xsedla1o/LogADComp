@@ -1,12 +1,22 @@
+import time
 from abc import abstractmethod, ABC
-from typing import Union, Type, Dict, Tuple
+from typing import Union, Type, Dict, Tuple, List
 
+import numpy as np
 import optuna
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset
 
 from dataloader import NdArr, DataLoader
 from loglizer.loglizer.models import SVM, LogClustering
 from preprocess import Normalizer
-from sempca.models import PCAPlusPlus, PCA
+from sempca.const import device
+from sempca.entities import Instance
+from sempca.models import PCAPlusPlus, PCA, DeepLog
+from sempca.utils import get_logger, update_sequences
+from sempca.utils import tqdm
+from utils import calculate_metrics
 
 
 class LogADCompAdapter(ABC):
@@ -243,9 +253,273 @@ class LogClusterAdapter(LogADCompAdapter):
         self._model.fit(x_train[y_train == 0, :])
 
 
+def generate_inputs_by_instances(instances, window, step=1):
+    """
+    Generate batched inputs by given instances.
+    Parameters
+    ----------
+    instances: input insances for training.
+    window: windows size for sliding window in DeepLog
+    step: step size in DeepLog
+
+    Returns: TensorDataset of training inputs and labels.
+    -------
+
+    """
+    num_sessions = 0
+    inputs = []
+    outputs = []
+    for inst in instances:
+        if inst.label == "Normal":
+            num_sessions += 1
+            event_list = tuple(map(int, inst.sequence))
+            for i in range(0, len(event_list) - window, step):
+                inputs.append(event_list[i : i + window])
+                outputs.append(event_list[i + window])
+    # DeepLogLogger.info("Number of sessions: {}".format(num_sessions))
+    # DeepLogLogger.info("Number of seqs: {}".format(len(inputs)))
+    dataset = TensorDataset(
+        torch.tensor(inputs, dtype=torch.float32),
+        torch.tensor(outputs, dtype=torch.long),
+    )
+    return dataset
+
+
+class DeepLogAdapter(LogADCompAdapter):
+    def __init__(self, window=10):
+        super().__init__()
+        self.log = get_logger("DeepLogAdapter")
+        self.window = window
+        # self.last_model_output = self.data_paths
+        self._model = None  # DeepLog()
+
+    @staticmethod
+    def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
+        return loader.get_deeplog_instances()
+
+    def get_event2index(self, x_train, x_test):
+        """
+        Calculate unique events in pre & post for event count vector calculation.
+        :param x_train: pre data, including training set and validation set(if has)
+        :param x_test: post data, mostly testing set
+        :return: mappings
+        """
+        self.log.info("Getting train instances' event-idx mapping.")
+
+        train_event2idx = {}
+        test_event2idx = {}
+
+        events = set()
+        for inst in x_train:
+            events.update((int(event) for event in inst.sequence))
+        train_events = sorted(list(events))
+
+        embed_size = len(train_events)
+        self.log.info("Embed size: %d in train dataset." % embed_size)
+        for idx, event in enumerate(train_events):
+            train_event2idx[event] = idx
+
+        self.log.info("Getting test instances' event-idx mapping.")
+
+        events = set()
+        for inst in x_test:
+            events.update((int(event) for event in inst.sequence))
+        test_events = sorted(list(events))
+
+        base = len(train_events)
+        increment = 0
+        for event in test_events:
+            if event not in train_events:
+                train_events.append(event)
+                test_event2idx[event] = base + increment
+                increment += 1
+            else:
+                test_event2idx[event] = train_event2idx[event]
+        embed_size = len(train_events)
+        self.log.info("Embed size: %d in test dataset." % embed_size)
+        return train_event2idx, test_event2idx
+
+    def preprocess_split(
+        self, x_train: NdArr, x_val: NdArr, x_test: NdArr
+    ) -> Tuple[NdArr, NdArr, NdArr]:
+        train_e2i, _test_e2i = self.get_event2index(
+            np.concatenate((x_train, x_val), axis=0), x_test
+        )
+        self.num_classes = len(train_e2i)
+
+        update_sequences(x_train, train_e2i)
+        update_sequences(x_val, train_e2i)
+        update_sequences(x_test, train_e2i)
+
+        x_train = generate_inputs_by_instances(x_train, window=self.window)
+        # x_val = generate_inputs_by_instances(x_val, window=self.window)
+        # x_test = generate_inputs_by_instances(x_test, window=self.window)
+        return x_train, x_val, x_test
+
+    def train(
+        self,
+        x_train,
+        _y_train,
+        model: DeepLog,
+        num_epochs=32,
+        batch_size=32,
+        window_size=10,
+        input_size=1,
+        pruning_callback=None,
+    ):
+        self.log.info(
+            "Starting training with window size: %d, batch size: %d, num_epochs: %d",
+            window_size,
+            batch_size,
+            num_epochs,
+        )
+        self.log.info("Model: %s", model)
+        self.log.info("Number of candidates: %d", self.num_candidates)
+        train_loader = TorchDataLoader(x_train, batch_size=batch_size, shuffle=False)
+        model = model.to(device)
+
+        # Loss and optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters())
+
+        total_step = len(train_loader)
+        start_time = time.time()
+        for epoch in range(num_epochs):
+            model.train()
+            start = time.strftime("%H:%M:%S")
+            self.log.info(
+                "Starting epoch: %d | phase: train | start time: %s | learning rate: %f"
+                % (epoch + 1, start, optimizer.param_groups[0]["lr"])
+            )
+            train_loss = 0
+            for seq, label in tqdm(train_loader):
+                # Forward pass
+                seq = seq.view(-1, window_size, input_size).to(device)
+                output = model(seq)
+                loss = criterion(output, label.to(device))
+                # Backward
+                optimizer.zero_grad()
+                loss.backward()
+                train_loss += loss.item()
+                optimizer.step()
+            self.log.info(
+                "Epoch [{}/{}], train_loss: {:.4f}".format(
+                    epoch + 1, num_epochs, train_loss / total_step
+                )
+
+            )
+            elapsed_time = time.time() - start_time
+            self.log.info("elapsed_time: {:.3f}s".format(elapsed_time))
+
+            if pruning_callback is not None:
+                pruning_callback(model, epoch)
+
+            # torch.save(model.state_dict(), last_model_output)
+        self.log.info("Finished Training")
+
+    def predict(self, x_test):
+        return self._predict(self._model, x_test)
+
+    def _predict(self, model: DeepLog, x_test: List[Instance]):
+        model.to(device)
+        y_pred = []
+        with torch.no_grad():
+            for instance in tqdm(x_test):
+                # pad sequence if shorter than window size
+                seq = instance.sequence
+                pad_length = self.window + 1 - len(seq)
+                if pad_length > 0:
+                    seq = seq + [-1] * pad_length
+
+                # shape (L,)
+                seq_tensor = torch.tensor(seq, dtype=torch.float, device=device)
+                # sliding windows -> shape (L - win_size + 1, win_size).
+                windows = seq_tensor.unfold(0, self.window, 1)
+                # (L - win_size + 1, win_size) -> (L - win_size, win_size, 1)
+                windows = windows[:-1].unsqueeze(-1).to(device)
+                # labels -> shape (L - win_size,) == (num_windows,)
+                labels = seq_tensor[self.window :].to(device)
+
+                outputs = model(windows)
+
+                # (num_windows, num_classes) -> (num_windows, num_candidates)
+                topk_indices = torch.topk(outputs, self.num_candidates, dim=1).indices
+                matches = (topk_indices == labels.unsqueeze(1)).any(dim=1)
+                sample_pred = 0 if matches.all().item() else 1
+                y_pred.append(sample_pred)
+
+        return np.asarray(y_pred)
+
+    def get_trial_objective(self, x_train, y_train, x_val, y_val):
+        assert self.num_classes is not None, "Call split preprocessing first"
+
+        def objective(trial: optuna.Trial):
+            def pruning_callback(mod: DeepLog, epoch: int):
+                with torch.no_grad():
+                    y_pred = self._predict(mod, x_val)
+                    m = calculate_metrics(y_val, y_pred)
+
+                self.log.info("Validation F1: %f", m["f1"])
+
+                trial.report(m["f1"], epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            self.num_candidates = trial.suggest_int(
+                "num_candidates", 1, self.num_classes
+            )
+            model = DeepLog(
+                input_dim=1,
+                hidden=trial.suggest_categorical("hidden_size", [64]),
+                layer=trial.suggest_categorical("num_layers", [2]),
+                num_classes=self.num_classes,
+            )
+            self.train(
+                x_train,
+                y_train,
+                model=model,
+                num_epochs=5,
+                # num_epochs=trial.suggest_int("num_epochs", 10, 50, step=10),
+                batch_size=trial.suggest_categorical("batch_size", [32, 64, 128, 512]),
+                pruning_callback=pruning_callback,
+            )
+            y_pred = self._predict(model, x_val)
+            m = calculate_metrics(y_val, y_pred)
+            return m["f1"]
+
+        return objective
+
+    def set_params(
+        self,
+        input_dim: int = 1,
+        hidden_size: int = 6,
+        num_layers: int = 2,
+        num_candidates: int = 5,
+        num_epochs: int = 32,
+        batch_size: int = 32,
+        learning_rate: float = 0.001,
+    ):
+        assert self.num_classes is not None, "Call split preprocessing first"
+        self._model = DeepLog(input_dim, hidden_size, num_layers, self.num_classes)
+        self.num_candidates = num_candidates
+        self.num_epochs = num_epochs
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+
+    def fit(self, x_train, y_train):
+        self.train(
+            x_train,
+            y_train,
+            model=self._model,
+            num_epochs=self.num_epochs,
+            batch_size=self.batch_size,
+        )
+
+
 model_adapters: Dict[str, Type[LogADCompAdapter]] = {
     "PCA": PCAAdapter,
     "SemPCA": SemPCAAdapter,
     "SVM": SVMAdapter,
     "LogCluster": LogClusterAdapter,
+    "DeepLog": DeepLogAdapter,
 }

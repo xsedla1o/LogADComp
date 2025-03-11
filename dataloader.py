@@ -134,6 +134,16 @@ class DataLoader(ABC):
 
         return xs, ys
 
+    def get_deeplog_instances(self):
+        preprocessor, dataloader, drop_ids = self._parse()
+
+        instances = preprocessor.generate_instances(dataloader, drop_ids=drop_ids)
+        ys = np.asarray(
+            [int(preprocessor.label2id[inst.label]) for inst in instances], dtype=int
+        )
+
+        return np.asarray(instances, dtype=object), ys
+
     def split(
         self,
         xs: np.ndarray,
