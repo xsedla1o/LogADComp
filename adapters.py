@@ -422,32 +422,55 @@ class DeepLogAdapter(LogADCompAdapter):
 
     def _predict(self, model: DeepLog, x_test: List[Instance]):
         model.to(device)
-        y_pred = []
         with torch.no_grad():
-            for instance in tqdm(x_test):
-                # pad sequence if shorter than window size
-                seq = instance.sequence
+            windows_list = []
+            labels_list = []
+            window_counts = []
+
+            for instance in x_test:
+                seq = instance.sequence.copy()
                 pad_length = self.window + 1 - len(seq)
                 if pad_length > 0:
                     seq = seq + [-1] * pad_length
 
-                # shape (L,)
+                # shape: [L]
                 seq_tensor = torch.tensor(seq, dtype=torch.float, device=device)
-                # sliding windows -> shape (L - win_size + 1, win_size).
-                windows = seq_tensor.unfold(0, self.window, 1)
-                # (L - win_size + 1, win_size) -> (L - win_size, win_size, 1)
-                windows = windows[:-1].unsqueeze(-1).to(device)
-                # labels -> shape (L - win_size,) == (num_windows,)
-                labels = seq_tensor[self.window :].to(device)
+                # Get sliding windows shape: [L - window + 1, window]
+                windows = seq_tensor.unfold(0, self.window, 1)[:-1]
+                # labels -> shape (L - window,) == (num_windows,)
+                labels = seq_tensor[self.window:]
 
-                outputs = model(windows)
+                # (window, 1) -> (num_windows, window, 1)
+                windows_list.append(windows.unsqueeze(-1))
+                labels_list.append(labels)  # shape: (num_windows,)
+                window_counts.append(windows.shape[0])
 
-                # (num_windows, num_classes) -> (num_windows, num_candidates)
-                topk_indices = torch.topk(outputs, self.num_candidates, dim=1).indices
-                matches = (topk_indices == labels.unsqueeze(1)).any(dim=1)
-                sample_pred = 0 if matches.all().item() else 1
+            # (total_windows, window, 1)
+            all_windows = torch.cat(windows_list, dim=0)
+            # (total_windows,)
+            all_labels = torch.cat(labels_list, dim=0)
+
+            batch_size = 1024
+            outputs_list = []
+            for i in range(0, all_windows.size(0), batch_size):
+                batch_windows = all_windows[i: i + batch_size].to(device)
+                batch_outputs = model(batch_windows)  # (batch_size, num_classes)
+                outputs_list.append(batch_outputs.to("cpu"))
+
+            all_outputs = torch.cat(outputs_list, dim=0)
+            # (total_windows, num_classes) -> (total_windows, num_candidates)
+            topk_indices = torch.topk(all_outputs, self.num_candidates, dim=1).indices
+            # (total_windows,)
+            matches = (topk_indices == all_labels.unsqueeze(1)).any(dim=1)
+
+            # Reassemble the per-instance results using the window_counts.
+            y_pred = []
+            start_idx = 0
+            for count in window_counts:
+                seq_matches = matches[start_idx: start_idx + count]
+                sample_pred = 0 if seq_matches.all().item() else 1
                 y_pred.append(sample_pred)
-
+                start_idx += count
         return np.asarray(y_pred)
 
     def get_trial_objective(self, x_train, y_train, x_val, y_val):
@@ -459,7 +482,7 @@ class DeepLogAdapter(LogADCompAdapter):
                     y_pred = self._predict(mod, x_val)
                     m = calculate_metrics(y_val, y_pred)
 
-                self.log.info("Validation F1: %f", m["f1"])
+                self.log.info("Validation F1: %.4f", m["f1"])
 
                 trial.report(m["f1"], epoch)
                 if trial.should_prune():
