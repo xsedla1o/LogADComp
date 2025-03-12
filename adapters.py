@@ -406,7 +406,6 @@ class DeepLogAdapter(LogADCompAdapter):
                 "Epoch [{}/{}], train_loss: {:.4f}".format(
                     epoch + 1, num_epochs, train_loss / total_step
                 )
-
             )
             elapsed_time = time.time() - start_time
             self.log.info("elapsed_time: {:.3f}s".format(elapsed_time))
@@ -438,7 +437,7 @@ class DeepLogAdapter(LogADCompAdapter):
                 # Get sliding windows shape: [L - window + 1, window]
                 windows = seq_tensor.unfold(0, self.window, 1)[:-1]
                 # labels -> shape (L - window,) == (num_windows,)
-                labels = seq_tensor[self.window:]
+                labels = seq_tensor[self.window :]
 
                 # (window, 1) -> (num_windows, window, 1)
                 windows_list.append(windows.unsqueeze(-1))
@@ -453,21 +452,30 @@ class DeepLogAdapter(LogADCompAdapter):
             batch_size = 1024
             outputs_list = []
             for i in range(0, all_windows.size(0), batch_size):
-                batch_windows = all_windows[i: i + batch_size].to(device)
+                batch_windows = all_windows[i : i + batch_size].to(device)
                 batch_outputs = model(batch_windows)  # (batch_size, num_classes)
-                outputs_list.append(batch_outputs.to("cpu"))
+                outputs_list.append(batch_outputs)
 
             all_outputs = torch.cat(outputs_list, dim=0)
             # (total_windows, num_classes) -> (total_windows, num_candidates)
             topk_indices = torch.topk(all_outputs, self.num_candidates, dim=1).indices
             # (total_windows,)
+            topk_indices = topk_indices.to(all_labels.device)
             matches = (topk_indices == all_labels.unsqueeze(1)).any(dim=1)
+
+            if torch.cuda.is_available():
+                self.log.debug(
+                    "GPU usage: %d/%d, %d",
+                    torch.cuda.memory_allocated(device),
+                    torch.cuda.max_memory_allocated(device),
+                    torch.cuda.memory_reserved(device),
+                )
 
             # Reassemble the per-instance results using the window_counts.
             y_pred = []
             start_idx = 0
             for count in window_counts:
-                seq_matches = matches[start_idx: start_idx + count]
+                seq_matches = matches[start_idx : start_idx + count]
                 sample_pred = 0 if seq_matches.all().item() else 1
                 y_pred.append(sample_pred)
                 start_idx += count
