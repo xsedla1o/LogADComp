@@ -464,11 +464,15 @@ class DeepLogAdapter(LogADCompAdapter):
             matches = (topk_indices == all_labels.unsqueeze(1)).any(dim=1)
 
             if torch.cuda.is_available():
+                allocd = torch.cuda.memory_allocated(device)
+                reserved = torch.cuda.memory_reserved(device)
+                total = torch.cuda.get_device_properties(0).total_memory
                 self.log.debug(
-                    "GPU usage: %d/%d, %d",
-                    torch.cuda.memory_allocated(device),
-                    torch.cuda.max_memory_allocated(device),
-                    torch.cuda.memory_reserved(device),
+                    "GPU usage: %d (%d) / %d MB - %.2f%%",
+                    allocd // 1024 ** 2,
+                    reserved // 1024 ** 2,
+                    total // 1024 ** 2,
+                    allocd / total * 100,
                 )
 
             # Reassemble the per-instance results using the window_counts.
