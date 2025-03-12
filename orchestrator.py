@@ -26,42 +26,6 @@ def exists_and_not_empty(file_path: str) -> bool:
     )
 
 
-def get_HDFS(config: dict):
-    if all(exists_and_not_empty(config[x]) for x in ("dataset", "labels")):
-        print("files already downloaded")
-    else:
-        os.system(f"bash scripts/download.sh HDFS {config['dataset_dir']}")
-
-    if exists_and_not_empty(config["processed_labels"]):
-        print("labels already processed")
-    else:
-        with (
-            open(config["labels"], "r") as f,
-            open(config["processed_labels"], "w") as out_f,
-        ):
-            csv_reader = csv.reader(f)
-            csv_writer = csv.writer(out_f)
-            for i, row in enumerate(csv_reader):
-                if i == 0:
-                    continue
-                row[1] = "1" if row[1] == "Anomaly" else "0"
-                csv_writer.writerow(row)
-
-
-def get_BGL(config: dict):
-    if exists_and_not_empty(config["dataset"]):
-        print("files already downloaded")
-    else:
-        os.system(f"bash scripts/download.sh BGL {config['dataset_dir']}")
-
-
-def get_embeddings(config: dict):
-    if exists_and_not_empty(config["embeddings"]):
-        print("embeddings already downloaded")
-    else:
-        os.system(f"bash scripts/download.sh embeddings {config['dataset_dir']}")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -125,7 +89,7 @@ if __name__ == "__main__":
     paths = DataPaths(
         dataset_name=d_name,
         project_root=root_dir,
-        dataset_dir=f"{config_dict['dataset_dir']}/{d_name}",
+        datasets_dir=config_dict["dataset_dir"],
         label_file=config_dict["processed_labels"],
     )
     print(paths)

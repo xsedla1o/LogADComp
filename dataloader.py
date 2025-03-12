@@ -4,6 +4,7 @@ import os
 from abc import ABC, abstractmethod
 from functools import wraps
 from logging import Logger
+from pathlib import Path
 from typing import Tuple, Union, List, Callable, Dict, Type
 
 import numpy as np
@@ -17,7 +18,7 @@ NdArr = np.ndarray
 NdArrPair = Tuple[np.ndarray, np.ndarray]
 
 
-def exists_and_not_empty(file_path: str) -> bool:
+def exists_and_not_empty(file_path: Union[Path, str]) -> bool:
     return (
         os.path.exists(file_path)
         and os.path.isfile(file_path)
@@ -78,10 +79,15 @@ class DataLoader(ABC):
     def __init__(self, config: dict, paths: DataPaths):
         self.config = config
         self.paths = paths
+        self.config["embeddings"] = paths.word2vec_file
 
-    @abstractmethod
     def get(self):
         """Download the dataset"""
+        self._get_embeddings()
+
+    @skip_when_present("embeddings")
+    def _get_embeddings(self):
+        os.system(f"bash scripts/download.sh embeddings {self.config['dataset_dir']}")
 
     @abstractmethod
     def _parse(self) -> Tuple[Preprocessor, BasicDataLoader, set]:
@@ -191,6 +197,7 @@ class HDFS(DataLoader):
     log = get_logger("DataLoader.HDFS")
 
     def get(self):
+        super().get()
         self._get_dataset()
         self._preprocess_labels()
 
@@ -235,8 +242,12 @@ class HDFS(DataLoader):
 class BGL(DataLoader):
     log = get_logger("DataLoader.BGL")
 
-    @skip_when_present("dataset")
     def get(self):
+        super().get()
+        self._get_dataset()
+
+    @skip_when_present("dataset")
+    def _get_dataset(self):
         os.system(f"bash scripts/download.sh BGL {self.config['dataset_dir']}")
 
     def _parse(self) -> Tuple[Preprocessor, BasicDataLoader, set]:
