@@ -253,38 +253,6 @@ class LogClusterAdapter(LogADCompAdapter):
         self._model.fit(x_train[y_train == 0, :])
 
 
-def generate_inputs_by_instances(instances, window, step=1):
-    """
-    Generate batched inputs by given instances.
-    Parameters
-    ----------
-    instances: input insances for training.
-    window: windows size for sliding window in DeepLog
-    step: step size in DeepLog
-
-    Returns: TensorDataset of training inputs and labels.
-    -------
-
-    """
-    num_sessions = 0
-    inputs = []
-    outputs = []
-    for inst in instances:
-        if inst.label == "Normal":
-            num_sessions += 1
-            event_list = tuple(map(int, inst.sequence))
-            for i in range(0, len(event_list) - window, step):
-                inputs.append(event_list[i : i + window])
-                outputs.append(event_list[i + window])
-    # DeepLogLogger.info("Number of sessions: {}".format(num_sessions))
-    # DeepLogLogger.info("Number of seqs: {}".format(len(inputs)))
-    dataset = TensorDataset(
-        torch.tensor(inputs, dtype=torch.float32),
-        torch.tensor(outputs, dtype=torch.long),
-    )
-    return dataset
-
-
 class DeepLogAdapter(LogADCompAdapter):
     def __init__(self, window=10):
         super().__init__()
@@ -351,17 +319,45 @@ class DeepLogAdapter(LogADCompAdapter):
         update_sequences(x_val, train_e2i)
         update_sequences(x_test, train_e2i)
 
-        x_train = generate_inputs_by_instances(x_train, window=self.window)
-        # x_val = generate_inputs_by_instances(x_val, window=self.window)
-        # x_test = generate_inputs_by_instances(x_test, window=self.window)
         return x_train, x_val, x_test
+
+    def generate_inputs_by_instances(self, instances, window, step=1):
+        """
+        Generate batched inputs by given instances.
+        Parameters
+        ----------
+        instances: input insances for training.
+        window: windows size for sliding window in DeepLog
+        step: step size in DeepLog
+
+        Returns
+        -------
+        TensorDataset of training inputs and labels.
+        """
+        num_sessions = 0
+        inputs = []
+        outputs = []
+        for inst in instances:
+            if inst.label == "Normal":
+                num_sessions += 1
+                event_list = tuple(map(int, inst.sequence))
+                for i in range(0, len(event_list) - window, step):
+                    inputs.append(event_list[i : i + window])
+                    outputs.append(event_list[i + window])
+        self.log.debug("Number of sessions: %s", num_sessions)
+        self.log.debug("Number of seqs: %s", len(inputs))
+        dataset = TensorDataset(
+            torch.tensor(inputs, dtype=torch.float32),
+            torch.tensor(outputs, dtype=torch.long),
+        )
+        return dataset
 
     def train(
         self,
         x_train,
         _y_train,
         model: DeepLog,
-        num_epochs=32,
+        num_epochs=5,
         batch_size=32,
         window_size=10,
         input_size=1,
@@ -375,6 +371,7 @@ class DeepLogAdapter(LogADCompAdapter):
         )
         self.log.info("Model: %s", model)
         self.log.info("Number of candidates: %d", self.num_candidates)
+        x_train = self.generate_inputs_by_instances(x_train, window=window_size)
         train_loader = TorchDataLoader(x_train, batch_size=batch_size, shuffle=False)
         model = model.to(device)
 
@@ -469,9 +466,9 @@ class DeepLogAdapter(LogADCompAdapter):
                 total = torch.cuda.get_device_properties(0).total_memory
                 self.log.debug(
                     "GPU usage: %d (%d) / %d MB - %.2f%%",
-                    allocd // 1024 ** 2,
-                    reserved // 1024 ** 2,
-                    total // 1024 ** 2,
+                    allocd // 1024**2,
+                    reserved // 1024**2,
+                    total // 1024**2,
                     allocd / total * 100,
                 )
 
@@ -513,7 +510,7 @@ class DeepLogAdapter(LogADCompAdapter):
                 x_train,
                 y_train,
                 model=model,
-                num_epochs=5,
+                num_epochs=trial.suggest_categorical("num_epochs", [5]),
                 # num_epochs=trial.suggest_int("num_epochs", 10, 50, step=10),
                 batch_size=trial.suggest_categorical("batch_size", [32, 64, 128, 512]),
                 pruning_callback=pruning_callback,
@@ -530,7 +527,7 @@ class DeepLogAdapter(LogADCompAdapter):
         hidden_size: int = 6,
         num_layers: int = 2,
         num_candidates: int = 5,
-        num_epochs: int = 32,
+        num_epochs: int = 5,
         batch_size: int = 32,
         learning_rate: float = 0.001,
     ):
