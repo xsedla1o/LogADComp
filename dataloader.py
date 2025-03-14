@@ -140,9 +140,15 @@ class DataLoader(ABC):
 
         return xs, ys
 
-    def get_deeplog_instances(self):
-        preprocessor, dataloader, drop_ids = self._parse()
+    def get_embedding_and_instances(self):
+        preprocessor, dl, d_ids = self._parse()
+        return dl.id2embed, self._get_instances(preprocessor, dl, d_ids)
 
+    def get_instances(self):
+        preprocessor, dataloader, drop_ids = self._parse()
+        return self._get_instances(preprocessor, dataloader, drop_ids)
+
+    def _get_instances(self, preprocessor, dataloader, drop_ids):
         instances = preprocessor.generate_instances(dataloader, drop_ids=drop_ids)
         ys = np.asarray(
             [int(preprocessor.label2id[inst.label]) for inst in instances], dtype=int

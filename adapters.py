@@ -13,8 +13,16 @@ from loglizer.loglizer.models import SVM, LogClustering
 from preprocess import Normalizer
 from sempca.const import device
 from sempca.entities import Instance
-from sempca.models import PCAPlusPlus, PCA, DeepLog
-from sempca.utils import get_logger, update_sequences
+from sempca.models import PCAPlusPlus, PCA, DeepLog, LogAnomaly
+from sempca.module import Optimizer, Vocab
+from sempca.representations import FeatureExtractor
+from sempca.utils import (
+    get_logger,
+    update_sequences,
+    generate_subseq_dual_tinsts,
+    data_iter,
+    summarize_subsequences, update_instances,
+)
 from sempca.utils import tqdm
 from utils import calculate_metrics
 
@@ -263,7 +271,7 @@ class DeepLogAdapter(LogADCompAdapter):
 
     @staticmethod
     def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
-        return loader.get_deeplog_instances()
+        return loader.get_instances()
 
     def get_event2index(self, x_train, x_test):
         """
@@ -548,10 +556,263 @@ class DeepLogAdapter(LogADCompAdapter):
         )
 
 
+class LogAnomalyAdapter(LogADCompAdapter):
+    def __init__(self, window=10):
+        super().__init__()
+        self.log = get_logger("LogAnomalyAdapter")
+        self.window = window
+        self._model = None  # Underlying LogAnomaly model instance.
+        self.vocab = None  # Vocabulary; must be set externally after preprocessing.
+        self.feature_extractor = FeatureExtractor()
+        self.num_classes = None  # Must be set via preprocessing splits.
+        self.num_candidates = None
+        self.epochs = None
+        self.batch_size = None
+        self.learning_rate = None
+
+    def transform_representation(self, loader: DataLoader) -> tuple:
+        """
+        Use the DataLoader's unified method to obtain instances and labels.
+        (Expects the DataLoader to implement a 'get_instances' method.)
+        """
+        embedding, instances = loader.get_embedding_and_instances()
+        self.vocab = Vocab()
+        self.vocab.load_from_dict(embedding)
+        return instances
+
+    def get_event2index(self, x_train, x_test):
+        """
+        Calculate unique events in pre & post for event count vector calculation.
+        :param x_train: pre data, including training set and validation set(if has)
+        :param x_test: post data, mostly testing set
+        :return: mappings
+        """
+        self.log.info("Getting train instances' event-idx mapping.")
+
+        train_event2idx = {}
+        test_event2idx = {}
+
+        events = set()
+        for inst in x_train:
+            events.update((int(event) for event in inst.sequence))
+        train_events = sorted(list(events))
+
+        embed_size = len(train_events)
+        self.log.info("Embed size: %d in train dataset." % embed_size)
+        for idx, event in enumerate(train_events):
+            train_event2idx[event] = idx
+
+        self.log.info("Getting test instances' event-idx mapping.")
+
+        events = set()
+        for inst in x_test:
+            events.update((int(event) for event in inst.sequence))
+        test_events = sorted(list(events))
+
+        base = len(train_events)
+        increment = 0
+        for event in test_events:
+            if event not in train_events:
+                train_events.append(event)
+                test_event2idx[event] = base + increment
+                increment += 1
+            else:
+                test_event2idx[event] = train_event2idx[event]
+        embed_size = len(train_events)
+        self.log.info("Embed size: %d in test dataset." % embed_size)
+        return train_event2idx, test_event2idx
+
+    def preprocess_split(
+            self, x_train: np.ndarray, x_val: np.ndarray, x_test: np.ndarray
+    ) -> tuple:
+        """
+        For LogAnomaly, update the training and test splits.
+        (Assumes update_instances returns (x_train, x_test, _))
+        """
+        train_e2i, _test_e2i = self.get_event2index(
+            np.concatenate((x_train, x_val), axis=0), x_test
+        )
+        self.num_classes = len(train_e2i)
+
+        x_train, x_test, _ = update_instances(x_train, x_test)
+        x_train, x_val, _ = update_instances(x_train, x_val)
+
+        # This is done to fit the feature extractor on the training data.
+        self.feature_extractor.fit_transform(
+            np.asarray([inst.sequence for inst in x_train], dtype=object)
+        )
+
+        return x_train, x_val, x_test
+
+    def get_trial_objective(self, x_train, y_train, x_val, y_val):
+        """
+        Return an objective function for hyperparameter tuning via optuna.
+        This implementation reuses the adapter instance and only instantiates a new underlying
+        LogAnomaly model when set_params is called.
+        """
+
+        def objective(trial):
+            # Hyperparameter suggestions.
+            self.num_candidates = trial.suggest_int(
+                "num_candidates", 1, self.num_classes
+            )
+            hidden_size = trial.suggest_categorical("hidden_size", [128])
+            num_layers = trial.suggest_categorical("num_layers", [2])
+            epochs = trial.suggest_categorical("epochs", [5])
+            batch_size = trial.suggest_categorical("batch_size", [2048])
+            # Set parameters and instantiate a new underlying model.
+            self.set_params(
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                num_candidates=self.num_candidates,
+                epochs=epochs,
+                batch_size=batch_size,
+                learning_rate=0.001,
+            )
+            # Generate training instances from x_train.
+            training_instances = self.generate_training_instances(
+                x_train, self.window, step=1
+            )
+            # Train the underlying model.
+            self.train(training_instances)
+            # Evaluate on the validation set.
+            y_pred = self._model.evaluate(
+                x_val, self.feature_extractor, self.num_candidates
+            )
+            metrics = calculate_metrics(y_val, y_pred)
+            return metrics["f1"]
+
+        return objective
+
+    def set_params(
+            self,
+            hidden_size: int = 128,
+            num_layers: int = 2,
+            num_candidates: int = None,
+            epochs: int = 5,
+            batch_size: int = 2048,
+            learning_rate: float = 0.001,
+    ):
+        """
+        Set hyperparameters and instantiate the LogAnomaly model.
+        It is assumed that self.vocab and self.num_classes have been set prior to this call.
+        """
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.num_candidates = num_candidates
+        self._model = LogAnomaly(self.vocab, hidden_size, self.num_classes, device)
+        self.log.info("LogAnomaly instantiated: %s", self._model.model)
+
+    def generate_training_instances(
+            self, instances, window_size: int = None, step: int = 1
+    ):
+        """
+        Generate training instances by summarizing subsequences.
+        """
+        if window_size is None:
+            window_size = self.window
+        return summarize_subsequences(instances, window_size, step)
+
+    def train(
+            self, training_instances, model_save_path: str = None, pruning_callback=None
+    ):
+        """
+        Train the LogAnomaly model.
+        For each batch:
+          - Extract sequential data from instances.
+          - Use the feature extractor to obtain quantity features.
+          - Attach the computed quantities to each instance.
+          - Generate training inputs/targets.
+          - Compute loss, backpropagate, apply gradient clipping, and update the model.
+        """
+        self.log.info(
+            "Starting training for %d epochs with batch size %d",
+            self.epochs,
+            self.batch_size,
+        )
+        optimizer = Optimizer(
+            filter(lambda p: p.requires_grad, self._model.model.parameters())
+        )
+        global_step = 0
+        batch_num = int(np.ceil(len(training_instances) / float(self.batch_size)))
+        for epoch in range(self.epochs):
+            self._model.model.train()
+            start = time.strftime("%H:%M:%S")
+            self.log.info(
+                "Epoch %d starting at %s with learning rate: %s",
+                epoch + 1,
+                start,
+                optimizer.lr,
+            )
+            batch_iter = 0
+            for onebatch in tqdm(data_iter(
+                    training_instances, self.batch_size, shuffle=True
+            )):
+                self._model.model.train()
+                subseq_sequential = [inst.sequential for inst in onebatch]
+                subseq_sequential = np.asarray(subseq_sequential, dtype=object)
+                subseq_quantities = self.feature_extractor.transform(
+                    subseq_sequential, silent=True
+                )
+                assert len(onebatch) == subseq_quantities.shape[0], (
+                    "Batch size mismatch with extracted quantities"
+                )
+                for i in range(subseq_quantities.shape[0]):
+                    onebatch[i].quantity = subseq_quantities[i, :]
+                tinst = generate_subseq_dual_tinsts(
+                    onebatch, self.vocab, self.feature_extractor
+                )
+                if device.type == "cuda":
+                    tinst.to_cuda(device)
+                loss = self._model.forward(tinst.inputs, tinst.targets)
+                loss_value = loss.data.cpu().numpy()
+                loss.backward()
+                if batch_iter % 100 == 0:
+                    self.log.info(
+                        "Step:%d, Epoch:%d, Batch:%d, loss:%.2f",
+                        global_step,
+                        epoch + 1,
+                        batch_iter,
+                        loss_value,
+                    )
+                batch_iter += 1
+                nn.utils.clip_grad_norm_(
+                    filter(lambda p: p.requires_grad, self._model.model.parameters()),
+                    max_norm=1,
+                )
+                optimizer.step()
+                self._model.model.zero_grad()
+                global_step += 1
+                if pruning_callback is not None:
+                    pruning_callback(self._model, epoch)
+            self.log.info("Epoch %d finished.", epoch + 1)
+            if model_save_path is not None:
+                torch.save(self._model.model.state_dict(), model_save_path)
+        self.log.info("Training complete.")
+
+    def fit(self, x_train, y_train):
+        """
+        Fit the model using the provided training instances.
+        (Note: For LogAnomaly, y_train is not used directly.)
+        """
+        training_instances = self.generate_training_instances(
+            x_train, self.window, step=1
+        )
+        self.train(training_instances)
+
+    def predict(self, x_test):
+        """
+        Predict on test data by delegating to the underlying model.
+        """
+        return self._model.predict(x_test)
+
+
 model_adapters: Dict[str, Type[LogADCompAdapter]] = {
     "PCA": PCAAdapter,
     "SemPCA": SemPCAAdapter,
     "SVM": SVMAdapter,
     "LogCluster": LogClusterAdapter,
     "DeepLog": DeepLogAdapter,
+    "LogAnomaly": LogAnomalyAdapter,
 }
