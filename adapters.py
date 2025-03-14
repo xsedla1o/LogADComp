@@ -1,11 +1,12 @@
 import time
 from abc import abstractmethod, ABC
-from typing import Union, Type, Dict, Tuple, List
+from typing import Union, Type, Dict, Tuple, List, Optional
 
 import numpy as np
 import optuna
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset
 
 from dataloader import NdArr, DataLoader
@@ -15,13 +16,11 @@ from sempca.const import device
 from sempca.entities import Instance
 from sempca.models import PCAPlusPlus, PCA, DeepLog, LogAnomaly
 from sempca.module import Optimizer, Vocab
-from sempca.representations import FeatureExtractor
 from sempca.utils import (
     get_logger,
     update_sequences,
-    generate_subseq_dual_tinsts,
-    data_iter,
-    summarize_subsequences, update_instances,
+    summarize_subsequences,
+    update_instances,
 )
 from sempca.utils import tqdm
 from utils import calculate_metrics
@@ -561,9 +560,8 @@ class LogAnomalyAdapter(LogADCompAdapter):
         super().__init__()
         self.log = get_logger("LogAnomalyAdapter")
         self.window = window
-        self._model = None  # Underlying LogAnomaly model instance.
-        self.vocab = None  # Vocabulary; must be set externally after preprocessing.
-        self.feature_extractor = FeatureExtractor()
+        self._model: Optional[LogAnomaly] = None
+        self.vocab: Optional[Vocab] = None
         self.num_classes = None  # Must be set via preprocessing splits.
         self.num_candidates = None
         self.epochs = None
@@ -623,7 +621,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
         return train_event2idx, test_event2idx
 
     def preprocess_split(
-            self, x_train: np.ndarray, x_val: np.ndarray, x_test: np.ndarray
+        self, x_train: np.ndarray, x_val: np.ndarray, x_test: np.ndarray
     ) -> tuple:
         """
         For LogAnomaly, update the training and test splits.
@@ -633,14 +631,8 @@ class LogAnomalyAdapter(LogADCompAdapter):
             np.concatenate((x_train, x_val), axis=0), x_test
         )
         self.num_classes = len(train_e2i)
-
         x_train, x_test, _ = update_instances(x_train, x_test)
         x_train, x_val, _ = update_instances(x_train, x_val)
-
-        # This is done to fit the feature extractor on the training data.
-        self.feature_extractor.fit_transform(
-            np.asarray([inst.sequence for inst in x_train], dtype=object)
-        )
 
         return x_train, x_val, x_test
 
@@ -669,12 +661,8 @@ class LogAnomalyAdapter(LogADCompAdapter):
                 batch_size=batch_size,
                 learning_rate=0.001,
             )
-            # Generate training instances from x_train.
-            training_instances = self.generate_training_instances(
-                x_train, self.window, step=1
-            )
             # Train the underlying model.
-            self.train(training_instances)
+            self.train(x_train)
             # Evaluate on the validation set.
             y_pred = self._model.evaluate(
                 x_val, self.feature_extractor, self.num_candidates
@@ -685,13 +673,13 @@ class LogAnomalyAdapter(LogADCompAdapter):
         return objective
 
     def set_params(
-            self,
-            hidden_size: int = 128,
-            num_layers: int = 2,
-            num_candidates: int = None,
-            epochs: int = 5,
-            batch_size: int = 2048,
-            learning_rate: float = 0.001,
+        self,
+        hidden_size: int = 128,
+        num_layers: int = 2,
+        num_candidates: int = None,
+        epochs: int = 5,
+        batch_size: int = 2048,
+        learning_rate: float = 0.001,
     ):
         """
         Set hyperparameters and instantiate the LogAnomaly model.
@@ -705,7 +693,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
         self.log.info("LogAnomaly instantiated: %s", self._model.model)
 
     def generate_training_instances(
-            self, instances, window_size: int = None, step: int = 1
+        self, instances, window_size: int = None, step: int = 1
     ):
         """
         Generate training instances by summarizing subsequences.
@@ -714,8 +702,42 @@ class LogAnomalyAdapter(LogADCompAdapter):
             window_size = self.window
         return summarize_subsequences(instances, window_size, step)
 
+    def generate_inputs_by_instances(self, instances, window, step=1) -> TensorDataset:
+        """
+        Generate batched inputs by given instances.
+        Parameters
+        ----------
+        instances: input insances for training.
+        window: windows size for sliding window in DeepLog
+        step: step size in DeepLog
+
+        Returns
+        -------
+        TensorDataset of training inputs and labels.
+        """
+        num_sessions = 0
+        inputs = []
+        outputs = []
+        for inst in instances:
+            if inst.label == "Normal":
+                num_sessions += 1
+                event_list = tuple(map(int, inst.sequence))
+                for i in range(0, len(event_list) - window, step):
+                    inputs.append(event_list[i : i + window])
+                    outputs.append(event_list[i + window])
+        self.log.debug("Number of sessions: %s", num_sessions)
+        self.log.debug("Number of seqs: %s", len(inputs))
+        dataset = TensorDataset(
+            torch.tensor(inputs, dtype=torch.long),
+            torch.tensor(outputs, dtype=torch.long),
+        )
+        return dataset
+
     def train(
-            self, training_instances, model_save_path: str = None, pruning_callback=None
+        self,
+        x_train: np.ndarray[Instance],
+        model_save_path: str = None,
+        pruning_callback=None,
     ):
         """
         Train the LogAnomaly model.
@@ -735,7 +757,13 @@ class LogAnomalyAdapter(LogADCompAdapter):
             filter(lambda p: p.requires_grad, self._model.model.parameters())
         )
         global_step = 0
-        batch_num = int(np.ceil(len(training_instances) / float(self.batch_size)))
+
+        train_set = self.generate_inputs_by_instances(x_train, self.window)
+        train_loader = TorchDataLoader(
+            train_set, batch_size=self.batch_size, shuffle=True
+        )
+        n_events = self.num_classes
+
         for epoch in range(self.epochs):
             self._model.model.train()
             start = time.strftime("%H:%M:%S")
@@ -745,27 +773,13 @@ class LogAnomalyAdapter(LogADCompAdapter):
                 start,
                 optimizer.lr,
             )
+
             batch_iter = 0
-            for onebatch in tqdm(data_iter(
-                    training_instances, self.batch_size, shuffle=True
-            )):
+            for seq, label in tqdm(train_loader):
                 self._model.model.train()
-                subseq_sequential = [inst.sequential for inst in onebatch]
-                subseq_sequential = np.asarray(subseq_sequential, dtype=object)
-                subseq_quantities = self.feature_extractor.transform(
-                    subseq_sequential, silent=True
-                )
-                assert len(onebatch) == subseq_quantities.shape[0], (
-                    "Batch size mismatch with extracted quantities"
-                )
-                for i in range(subseq_quantities.shape[0]):
-                    onebatch[i].quantity = subseq_quantities[i, :]
-                tinst = generate_subseq_dual_tinsts(
-                    onebatch, self.vocab, self.feature_extractor
-                )
-                if device.type == "cuda":
-                    tinst.to_cuda(device)
-                loss = self._model.forward(tinst.inputs, tinst.targets)
+                seq = seq.to(device)
+                qual = F.one_hot(seq, n_events).sum(dim=1).float().to(device)
+                loss = self._model.forward((seq, qual, None), label)
                 loss_value = loss.data.cpu().numpy()
                 loss.backward()
                 if batch_iter % 100 == 0:
@@ -796,10 +810,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
         Fit the model using the provided training instances.
         (Note: For LogAnomaly, y_train is not used directly.)
         """
-        training_instances = self.generate_training_instances(
-            x_train, self.window, step=1
-        )
-        self.train(training_instances)
+        self.train(x_train)
 
     def predict(self, x_test):
         """
