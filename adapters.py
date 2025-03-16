@@ -759,7 +759,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
             lr=self.learning_rate,
         )
         global_step = 0
-        batch_step_coef = self.batch_size // 2048
+        batch_step_coef = 2048 // self.batch_size # 2048 is the default/max batch size
 
         train_set = self.generate_inputs_by_instances(x_train, self.window)
         train_loader = TorchDataLoader(
