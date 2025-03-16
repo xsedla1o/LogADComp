@@ -19,7 +19,6 @@ from sempca.module import Optimizer, Vocab
 from sempca.utils import (
     get_logger,
     update_sequences,
-    summarize_subsequences,
     update_instances,
 )
 from sempca.utils import tqdm
@@ -644,6 +643,17 @@ class LogAnomalyAdapter(LogADCompAdapter):
         """
 
         def objective(trial):
+            def pruning_callback(mod: LogAnomaly, epoch: int):
+                with torch.no_grad():
+                    y_pred = self._predict(mod, x_val)
+                    m = calculate_metrics(y_val, y_pred)
+
+                self.log.info("Validation F1: %.4f", m["f1"])
+
+                trial.report(m["f1"], epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
             # Hyperparameter suggestions.
             self.num_candidates = trial.suggest_int(
                 "num_candidates", 1, self.num_classes
@@ -651,7 +661,10 @@ class LogAnomalyAdapter(LogADCompAdapter):
             hidden_size = trial.suggest_categorical("hidden_size", [128])
             num_layers = trial.suggest_categorical("num_layers", [2])
             epochs = trial.suggest_categorical("epochs", [5])
-            batch_size = trial.suggest_categorical("batch_size", [2048])
+            batch_size = trial.suggest_categorical("batch_size", [128, 512, 1024, 2048])
+            learning_rate = trial.suggest_categorical(
+                "learning_rate", [1e-4, 1e-3, 2e-3]
+            )
             # Set parameters and instantiate a new underlying model.
             self.set_params(
                 hidden_size=hidden_size,
@@ -659,14 +672,12 @@ class LogAnomalyAdapter(LogADCompAdapter):
                 num_candidates=self.num_candidates,
                 epochs=epochs,
                 batch_size=batch_size,
-                learning_rate=0.001,
+                learning_rate=learning_rate,
             )
             # Train the underlying model.
-            self.train(x_train)
+            self.train(x_train, callback=pruning_callback)
             # Evaluate on the validation set.
-            y_pred = self._model.evaluate(
-                x_val, self.feature_extractor, self.num_candidates
-            )
+            y_pred = self.predict(x_val)
             metrics = calculate_metrics(y_val, y_pred)
             return metrics["f1"]
 
@@ -689,18 +700,8 @@ class LogAnomalyAdapter(LogADCompAdapter):
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.num_candidates = num_candidates
-        self._model = LogAnomaly(self.vocab, hidden_size, self.num_classes, device)
+        self._model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
         self.log.info("LogAnomaly instantiated: %s", self._model.model)
-
-    def generate_training_instances(
-        self, instances, window_size: int = None, step: int = 1
-    ):
-        """
-        Generate training instances by summarizing subsequences.
-        """
-        if window_size is None:
-            window_size = self.window
-        return summarize_subsequences(instances, window_size, step)
 
     def generate_inputs_by_instances(self, instances, window, step=1) -> TensorDataset:
         """
@@ -737,7 +738,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
         self,
         x_train: np.ndarray[Instance],
         model_save_path: str = None,
-        pruning_callback=None,
+        callback=None,
     ):
         """
         Train the LogAnomaly model.
@@ -754,7 +755,8 @@ class LogAnomalyAdapter(LogADCompAdapter):
             self.batch_size,
         )
         optimizer = Optimizer(
-            filter(lambda p: p.requires_grad, self._model.model.parameters())
+            filter(lambda p: p.requires_grad, self._model.model.parameters()),
+            lr=self.learning_rate,
         )
         global_step = 0
 
@@ -762,7 +764,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
         train_loader = TorchDataLoader(
             train_set, batch_size=self.batch_size, shuffle=True
         )
-        n_events = self.num_classes
+        vocab_size = self.vocab.vocab_size
 
         for epoch in range(self.epochs):
             self._model.model.train()
@@ -778,7 +780,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
             for seq, label in tqdm(train_loader):
                 self._model.model.train()
                 seq = seq.to(device)
-                qual = F.one_hot(seq, n_events).sum(dim=1).float().to(device)
+                qual = F.one_hot(seq, vocab_size).sum(dim=1).float().to(device)
                 loss = self._model.forward((seq, qual, None), label)
                 loss_value = loss.data.cpu().numpy()
                 loss.backward()
@@ -798,11 +800,11 @@ class LogAnomalyAdapter(LogADCompAdapter):
                 optimizer.step()
                 self._model.model.zero_grad()
                 global_step += 1
-                if pruning_callback is not None:
-                    pruning_callback(self._model, epoch)
             self.log.info("Epoch %d finished.", epoch + 1)
             if model_save_path is not None:
                 torch.save(self._model.model.state_dict(), model_save_path)
+            if callback is not None:
+                callback(self._model, epoch)
         self.log.info("Training complete.")
 
     def fit(self, x_train, y_train):
@@ -813,10 +815,78 @@ class LogAnomalyAdapter(LogADCompAdapter):
         self.train(x_train)
 
     def predict(self, x_test):
-        """
-        Predict on test data by delegating to the underlying model.
-        """
-        return self._model.predict(x_test)
+        return self._predict(self._model, x_test)
+
+    def _predict(self, model: LogAnomaly, x_test: List[Instance]):
+        vocab_size = self.vocab.vocab_size
+
+        model.model.eval()
+        with torch.no_grad():
+            windows_list = []
+            labels_list = []
+            window_counts = []
+
+            for instance in x_test:
+                seq = instance.sequence.copy()
+                pad_length = self.window + 1 - len(seq)
+                if pad_length > 0:
+                    seq = seq + [self.vocab.PAD] * pad_length
+
+                # shape: [L]
+                seq_tensor = torch.tensor(seq, dtype=torch.long, device=device)
+                # Get sliding windows shape: [L - window + 1, window]
+                windows = seq_tensor.unfold(0, self.window, 1)[:-1]
+                # labels -> shape (L - window,) == (num_windows,)
+                labels = seq_tensor[self.window :]
+
+                # (window,) -> (num_windows, window)
+                windows_list.append(windows)
+                labels_list.append(labels)  # shape: (num_windows,)
+                window_counts.append(windows.shape[0])
+
+            # (total_windows, window)
+            all_windows = torch.cat(windows_list, dim=0)
+            # (total_windows,)
+            all_labels = torch.cat(labels_list, dim=0)
+
+            batch_size = 1024
+            outputs_list = []
+            for i in range(0, all_windows.size(0), batch_size):
+                batch_windows = all_windows[i : i + batch_size].to(device)
+                qual = (
+                    F.one_hot(batch_windows, vocab_size).sum(dim=1).float().to(device)
+                )
+                batch_outputs = model.model((batch_windows, qual, None))
+                outputs_list.append(batch_outputs)
+
+            all_outputs = torch.cat(outputs_list, dim=0)
+            # (total_windows, num_classes) -> (total_windows, num_candidates)
+            topk_indices = torch.topk(all_outputs, self.num_candidates, dim=1).indices
+            # (total_windows,)
+            topk_indices = topk_indices.to(all_labels.device)
+            matches = (topk_indices == all_labels.unsqueeze(1)).any(dim=1)
+
+            if torch.cuda.is_available():
+                allocd = torch.cuda.memory_allocated(device)
+                reserved = torch.cuda.memory_reserved(device)
+                total = torch.cuda.get_device_properties(0).total_memory
+                self.log.debug(
+                    "GPU usage: %d (%d) / %d MB - %.2f%%",
+                    allocd // 1024**2,
+                    reserved // 1024**2,
+                    total // 1024**2,
+                    allocd / total * 100,
+                )
+
+            # Reassemble the per-instance results using the window_counts.
+            y_pred = []
+            start_idx = 0
+            for count in window_counts:
+                seq_matches = matches[start_idx : start_idx + count]
+                sample_pred = 0 if seq_matches.all().item() else 1
+                y_pred.append(sample_pred)
+                start_idx += count
+        return np.asarray(y_pred)
 
 
 model_adapters: Dict[str, Type[LogADCompAdapter]] = {
