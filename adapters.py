@@ -759,6 +759,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
             lr=self.learning_rate,
         )
         global_step = 0
+        batch_step_coef = self.batch_size // 2048
 
         train_set = self.generate_inputs_by_instances(x_train, self.window)
         train_loader = TorchDataLoader(
@@ -777,22 +778,25 @@ class LogAnomalyAdapter(LogADCompAdapter):
             )
 
             batch_iter = 0
+            total_loss = 0
+            last_printed_batch = 0
             for seq, label in tqdm(train_loader):
                 self._model.model.train()
                 seq = seq.to(device)
                 qual = F.one_hot(seq, vocab_size).sum(dim=1).float().to(device)
-                loss = self._model.forward((seq, qual, None), label)
-                loss_value = loss.data.cpu().numpy()
                 loss = self._model.forward((seq, qual, None), label.to(device))
+                total_loss += loss.data.cpu().numpy()
                 loss.backward()
-                if batch_iter % 100 == 0:
+                if (batch_iter / batch_step_coef) % 100 == 0:
                     self.log.info(
-                        "Step:%d, Epoch:%d, Batch:%d, loss:%.2f",
+                        "Step:%d, Epoch:%d, Batch:%d, avg loss:%.2f",
                         global_step,
                         epoch + 1,
                         batch_iter,
-                        loss_value,
+                        total_loss / (batch_iter - last_printed_batch + 1),
                     )
+                    total_loss = 0
+                    last_printed_batch = batch_iter
                 batch_iter += 1
                 nn.utils.clip_grad_norm_(
                     filter(lambda p: p.requires_grad, self._model.model.parameters()),
