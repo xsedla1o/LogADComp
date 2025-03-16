@@ -783,6 +783,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
                 qual = F.one_hot(seq, vocab_size).sum(dim=1).float().to(device)
                 loss = self._model.forward((seq, qual, None), label)
                 loss_value = loss.data.cpu().numpy()
+                loss = self._model.forward((seq, qual, None), label.to(device))
                 loss.backward()
                 if batch_iter % 100 == 0:
                     self.log.info(
