@@ -520,6 +520,7 @@ class DeepLogAdapter(DualTrialAdapter):
             batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 512])
             lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
 
+            self.num_candidates = self.num_classes  # dummy value
             model = DeepLog(
                 input_dim=1,
                 hidden=hidden_size,
@@ -559,6 +560,14 @@ class DeepLogAdapter(DualTrialAdapter):
         assert self.num_classes is not None, "Call split preprocessing first"
 
         self.set_params(**(prev_params or {}))
+        self.train(
+            x_train,
+            y_train,
+            model=self._model,
+            num_epochs=self.num_epochs,
+            batch_size=self.batch_size,
+            lr=self.lr,
+        )
 
         def objective(trial: optuna.Trial):
             self.num_candidates = trial.suggest_int(
