@@ -516,9 +516,9 @@ class DeepLogAdapter(DualTrialAdapter):
         def objective(trial: optuna.Trial):
             hidden_size = trial.suggest_categorical("hidden_size", [64])
             num_layers = trial.suggest_categorical("num_layers", [2])
-            num_epochs = trial.suggest_categorical("num_epochs", [5])
+            num_epochs = trial.suggest_categorical("num_epochs", [10])
             batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 512])
-            lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+            lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True, step=1e-4)
 
             self.num_candidates = self.num_classes  # dummy value
             model = DeepLog(
@@ -699,7 +699,7 @@ class LogAnomalyAdapter(DualTrialAdapter):
             """Return the validation loss for a given set of hyperparameters."""
             hidden_size = trial.suggest_categorical("hidden_size", [128])
             _num_layers = trial.suggest_categorical("num_layers", [2])
-            self.epochs = trial.suggest_categorical("epochs", [5])
+            self.epochs = trial.suggest_categorical("epochs", [10])
             self.batch_size = trial.suggest_categorical(
                 "batch_size", [128, 512, 1024, 2048]
             )
@@ -707,7 +707,7 @@ class LogAnomalyAdapter(DualTrialAdapter):
                 "learning_rate", [1e-4, 1e-3, 2e-3, 5e-3, 1e-2]
             )
             self.learning_rate_decay = trial.suggest_float(
-                "learning_rate_decay", 0.5, 0.99, step=0.01
+                "learning_rate_decay", 0.7, 0.99, step=0.01
             )
 
             model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
