@@ -8,7 +8,7 @@ import optuna
 import pandas as pd
 import tomli
 
-from adapters import model_adapters
+from adapters import model_adapters, DualTrialAdapter
 from dataloader import dataloaders
 from sempca.preprocessing import DataPaths
 from utils import Timed, calculate_metrics
@@ -81,6 +81,7 @@ if __name__ == "__main__":
         "ecv_npz": f"{dataset_dir}/{d_name}/{d_name}.ecv.npz",
         "output_dir": output_dir,
         "trials_output": f"{output_dir}/trials.csv",
+        "train_hyperparameters": f"{output_dir}/train_hyperparameters.json",
         "hyperparameters": f"{output_dir}/hyperparameters.json",
     }
 
@@ -99,6 +100,44 @@ if __name__ == "__main__":
 
     model = model_adapters[model_name]()
     xs, ys = model.transform_representation(dataloader)
+
+    if exists_and_not_empty(config_dict["train_hyperparameters"]):
+        print("Found train hyperparameters")
+        with open(config_dict["train_hyperparameters"], "r") as in_f:
+            best_train_params = json.load(in_f)
+    elif isinstance(model, DualTrialAdapter):
+        with Timed("Data loaded"):
+            (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
+                xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=0.0
+            )
+
+        with Timed("Fit feature extractor and transform data"):
+            x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
+
+        # Check if adapter requires training hyperparameters
+        study = optuna.create_study(direction="minimize")
+        with Timed("Optimize training hyperparameters"):
+            study.optimize(
+                model.get_training_trial_objective(x_train, y_train, x_val, y_val),
+                n_trials=n_trials,
+            )
+
+        print(study.trials_dataframe(attrs=("number", "value", "params", "state")))
+        print("Best loss value", study.best_value)
+
+        os.makedirs(config_dict["output_dir"], exist_ok=True)
+        study.trials_dataframe().to_csv(config_dict["train_hyperparameters"])
+        with open(config_dict["train_hyperparameters"], "w") as out_f:
+            json.dump(study.best_params, out_f)
+
+        best_train_params = study.best_params
+
+        del x_train, y_train, x_val, y_val, x_test, y_test
+        gc.collect()
+    else:
+        best_train_params = {}
+
+    print("Best train params", best_train_params)
 
     if all(
         exists_and_not_empty(config_dict[x])
@@ -120,7 +159,9 @@ if __name__ == "__main__":
         study = optuna.create_study(direction="maximize")
         with Timed("Optimize hyperparameters"):
             study.optimize(
-                model.get_trial_objective(x_train, y_train, x_val, y_val),
+                model.get_trial_objective(
+                    x_train, y_train, x_val, y_val, best_train_params
+                ),
                 n_trials=n_trials,
             )
 
@@ -156,7 +197,7 @@ if __name__ == "__main__":
         with Timed("Fit feature extractor and transform data"):
             x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
 
-        model.set_params(**best_params)
+        model.set_params(**best_train_params, **best_params)
 
         with Timed("Fit model"):
             model.fit(x_train, y_train)

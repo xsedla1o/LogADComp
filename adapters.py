@@ -43,7 +43,7 @@ class LogADCompAdapter(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_trial_objective(x_train, y_train, x_val, y_val):
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
         """Optuna objective function to optimize hyperparameters"""
 
     @abstractmethod
@@ -57,6 +57,13 @@ class LogADCompAdapter(ABC):
     def predict(self, x_test):
         """Predict on the test data"""
         return self._model.predict(x_test)
+
+
+class DualTrialAdapter(LogADCompAdapter):
+    @staticmethod
+    @abstractmethod
+    def get_training_trial_objective(x_train, y_train, x_val, y_val):
+        """Optuna objective function to optimize training hyperparameters"""
 
 
 class PCAAdapter(LogADCompAdapter):
@@ -80,7 +87,7 @@ class PCAAdapter(LogADCompAdapter):
         return x_train, x_val, x_test
 
     @staticmethod
-    def get_trial_objective(x_train, y_train, x_val, y_val):
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
         def objective(trial: optuna.Trial):
             threshold_mult = trial.suggest_float("threshold_mult", 0.1, 2.0)
             model = PCA(
@@ -130,7 +137,7 @@ class SemPCAAdapter(PCAAdapter):
         return x_train, x_val, x_test
 
     @staticmethod
-    def get_trial_objective(x_train, y_train, x_val, y_val):
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
         def objective(trial: optuna.Trial):
             # Getting a fixed threshold to work for all splits is hard,
             # maybe relying on Q statistics with a learned multiplier is better
@@ -181,7 +188,7 @@ class SVMAdapter(LogADCompAdapter):
         return x_train, x_val, x_test
 
     @staticmethod
-    def get_trial_objective(x_train, y_train, x_val, y_val):
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
         def objective(trial: optuna.Trial):
             model = SVM(
                 penalty=trial.suggest_categorical("penalty", ["l1", "l2"]),
@@ -231,7 +238,7 @@ class LogClusterAdapter(LogADCompAdapter):
         return x_train, x_val, x_test
 
     @staticmethod
-    def get_trial_objective(x_train, y_train, x_val, y_val):
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
         def objective(trial: optuna.Trial):
             model = LogClustering(
                 max_dist=trial.suggest_float("max_dist", 0.3, 0.8),
@@ -259,7 +266,7 @@ class LogClusterAdapter(LogADCompAdapter):
         self._model.fit(x_train[y_train == 0, :])
 
 
-class DeepLogAdapter(LogADCompAdapter):
+class DeepLogAdapter(DualTrialAdapter):
     def __init__(self, window=10):
         super().__init__()
         self.log = get_logger("DeepLogAdapter")
@@ -365,6 +372,7 @@ class DeepLogAdapter(LogADCompAdapter):
         model: DeepLog,
         num_epochs=5,
         batch_size=32,
+        lr=0.001,
         window_size=10,
         input_size=1,
         pruning_callback=None,
@@ -383,7 +391,7 @@ class DeepLogAdapter(LogADCompAdapter):
 
         # Loss and optimizer
         criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters())
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
         total_step = len(train_loader)
         start_time = time.time()
@@ -419,6 +427,18 @@ class DeepLogAdapter(LogADCompAdapter):
             # torch.save(model.state_dict(), last_model_output)
         self.log.info("Finished Training")
 
+    def get_val_loss(self, model, val_loader):
+        model.eval()
+        criterion = nn.CrossEntropyLoss()
+        val_loss = 0
+        with torch.no_grad():
+            for seq, label in val_loader:
+                seq = seq.view(-1, self.window, 1).to(device)
+                output = model(seq)
+                loss = criterion(output, label.to(device))
+                val_loss += loss.item()
+        return val_loss
+
     def predict(self, x_test):
         return self._predict(self._model, x_test)
 
@@ -436,7 +456,7 @@ class DeepLogAdapter(LogADCompAdapter):
                     seq = seq + [-1] * pad_length
 
                 # shape: [L]
-                seq_tensor = torch.tensor(seq, dtype=torch.float, device=device)
+                seq_tensor = torch.tensor(seq, dtype=torch.float)
                 # Get sliding windows shape: [L - window + 1, window]
                 windows = seq_tensor.unfold(0, self.window, 1)[:-1]
                 # labels -> shape (L - window,) == (num_windows,)
@@ -488,39 +508,66 @@ class DeepLogAdapter(LogADCompAdapter):
                 start_idx += count
         return np.asarray(y_pred)
 
-    def get_trial_objective(self, x_train, y_train, x_val, y_val):
+    def get_training_trial_objective(self, x_train, y_train, x_val, y_val):
+        """Optuna objective function to optimize training hyperparameters."""
         assert self.num_classes is not None, "Call split preprocessing first"
+        val_set = self.generate_inputs_by_instances(x_val, self.window)
 
         def objective(trial: optuna.Trial):
+            hidden_size = trial.suggest_categorical("hidden_size", [64])
+            num_layers = trial.suggest_categorical("num_layers", [2])
+            num_epochs = trial.suggest_categorical("num_epochs", [5])
+            batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 512])
+            lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+
+            model = DeepLog(
+                input_dim=1,
+                hidden=hidden_size,
+                layer=num_layers,
+                num_classes=self.num_classes,
+            )
+
+            val_loader = TorchDataLoader(val_set, batch_size=batch_size, shuffle=False)
+
             def pruning_callback(mod: DeepLog, epoch: int):
-                with torch.no_grad():
-                    y_pred = self._predict(mod, x_val)
-                    m = calculate_metrics(y_val, y_pred)
+                val_loss = self.get_val_loss(mod, val_loader)
+                self.log.info("Validation loss: %.4f", val_loss)
 
-                self.log.info("Validation F1: %.4f", m["f1"])
-
-                trial.report(m["f1"], epoch)
+                trial.report(val_loss, epoch)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
-            self.num_candidates = trial.suggest_int(
-                "num_candidates", 1, self.num_classes
-            )
-            model = DeepLog(
-                input_dim=1,
-                hidden=trial.suggest_categorical("hidden_size", [64]),
-                layer=trial.suggest_categorical("num_layers", [2]),
-                num_classes=self.num_classes,
-            )
             self.train(
                 x_train,
                 y_train,
                 model=model,
-                num_epochs=trial.suggest_categorical("num_epochs", [5]),
-                # num_epochs=trial.suggest_int("num_epochs", 10, 50, step=10),
-                batch_size=trial.suggest_categorical("batch_size", [32, 64, 128, 512]),
+                num_epochs=num_epochs,
+                batch_size=batch_size,
+                lr=lr,
                 pruning_callback=pruning_callback,
             )
+
+            val_loss = self.get_val_loss(model, val_loader)
+            return val_loss
+
+        return objective
+
+    def get_trial_objective(
+        self, x_train, y_train, x_val, y_val, prev_params: dict = None
+    ):
+        """Objective function for tuning evaluation-specific hyperparameters."""
+        assert self.num_classes is not None, "Call split preprocessing first"
+
+        self.set_params(**(prev_params or {}))
+
+        def objective(trial: optuna.Trial):
+            self.num_candidates = trial.suggest_int(
+                "num_candidates", 1, self.num_classes
+            )
+
+            self.set_params(num_candidates=self.num_candidates, **(prev_params or {}))
+
+            model = self._model  # Reuse already trained model if available
             y_pred = self._predict(model, x_val)
             m = calculate_metrics(y_val, y_pred)
             return m["f1"]
@@ -535,14 +582,14 @@ class DeepLogAdapter(LogADCompAdapter):
         num_candidates: int = 5,
         num_epochs: int = 5,
         batch_size: int = 32,
-        learning_rate: float = 0.001,
+        lr: float = 0.001,
     ):
         assert self.num_classes is not None, "Call split preprocessing first"
         self._model = DeepLog(input_dim, hidden_size, num_layers, self.num_classes)
         self.num_candidates = num_candidates
         self.num_epochs = num_epochs
         self.batch_size = batch_size
-        self.learning_rate = learning_rate
+        self.lr = lr
 
     def fit(self, x_train, y_train):
         self.train(
@@ -551,10 +598,11 @@ class DeepLogAdapter(LogADCompAdapter):
             model=self._model,
             num_epochs=self.num_epochs,
             batch_size=self.batch_size,
+            lr=self.lr,
         )
 
 
-class LogAnomalyAdapter(LogADCompAdapter):
+class LogAnomalyAdapter(DualTrialAdapter):
     def __init__(self, window=10):
         super().__init__()
         self.log = get_logger("LogAnomalyAdapter")
@@ -635,47 +683,68 @@ class LogAnomalyAdapter(LogADCompAdapter):
 
         return x_train, x_val, x_test
 
-    def get_trial_objective(self, x_train, y_train, x_val, y_val):
+    def get_training_trial_objective(self, x_train, y_train, x_val, y_val):
+        """Optuna objective function to optimize training hyperparameters"""
+
+        def objective(trial: optuna.Trial):
+            """Return the validation loss for a given set of hyperparameters."""
+            hidden_size = trial.suggest_categorical("hidden_size", [128])
+            _num_layers = trial.suggest_categorical("num_layers", [2])
+            self.epochs = trial.suggest_categorical("epochs", [5])
+            self.batch_size = trial.suggest_categorical(
+                "batch_size", [128, 512, 1024, 2048]
+            )
+            self.learning_rate = trial.suggest_categorical(
+                "learning_rate", [1e-4, 1e-3, 2e-3, 5e-3, 1e-2]
+            )
+            self.learning_rate_decay = trial.suggest_float(
+                "learning_rate_decay", 0.5, 0.99, step=0.01
+            )
+
+            model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
+            val_set = self.generate_inputs_by_instances(x_val, self.window)
+            val_loader = TorchDataLoader(
+                val_set, batch_size=self.batch_size, shuffle=False
+            )
+
+            def pruning_callback(mod: LogAnomaly, epoch: int):
+                with torch.no_grad():
+                    val_loss = self.get_val_loss(mod, val_loader)
+
+                self.log.info("Validation loss: %.4f", val_loss)
+
+                trial.report(val_loss, epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            self.train(model, x_train, callback=pruning_callback)
+            val_loss = self.get_val_loss(model, val_loader)
+            return val_loss
+
+        return objective
+
+    def get_trial_objective(
+        self, x_train, y_train, x_val, y_val, prev_params: dict = None
+    ):
         """
         Return an objective function for hyperparameter tuning via optuna.
         This implementation reuses the adapter instance and only instantiates a new underlying
         LogAnomaly model when set_params is called.
         """
 
+        self.set_params(**(prev_params or {}))
+        self.train(self._model, x_train)
+
         def objective(trial):
-            def pruning_callback(mod: LogAnomaly, epoch: int):
-                with torch.no_grad():
-                    y_pred = self._predict(mod, x_val)
-                    m = calculate_metrics(y_val, y_pred)
-
-                self.log.info("Validation F1: %.4f", m["f1"])
-
-                trial.report(m["f1"], epoch)
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
-
             # Hyperparameter suggestions.
             self.num_candidates = trial.suggest_int(
                 "num_candidates", 1, self.num_classes
             )
-            hidden_size = trial.suggest_categorical("hidden_size", [128])
-            num_layers = trial.suggest_categorical("num_layers", [2])
-            epochs = trial.suggest_categorical("epochs", [5])
-            batch_size = trial.suggest_categorical("batch_size", [128, 512, 1024, 2048])
-            learning_rate = trial.suggest_categorical(
-                "learning_rate", [1e-4, 1e-3, 2e-3]
-            )
             # Set parameters and instantiate a new underlying model.
             self.set_params(
-                hidden_size=hidden_size,
-                num_layers=num_layers,
                 num_candidates=self.num_candidates,
-                epochs=epochs,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
+                **(prev_params or {}),
             )
-            # Train the underlying model.
-            self.train(x_train, callback=pruning_callback)
             # Evaluate on the validation set.
             y_pred = self.predict(x_val)
             metrics = calculate_metrics(y_val, y_pred)
@@ -691,6 +760,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
         epochs: int = 5,
         batch_size: int = 2048,
         learning_rate: float = 0.001,
+        learning_rate_decay: float = 0.75,
     ):
         """
         Set hyperparameters and instantiate the LogAnomaly model.
@@ -699,7 +769,10 @@ class LogAnomalyAdapter(LogADCompAdapter):
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
+        self.learning_rate_decay = learning_rate_decay
+
         self.num_candidates = num_candidates
+
         self._model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
         self.log.info("LogAnomaly instantiated: %s", self._model.model)
 
@@ -736,6 +809,7 @@ class LogAnomalyAdapter(LogADCompAdapter):
 
     def train(
         self,
+        model: LogAnomaly,
         x_train: np.ndarray[Instance],
         model_save_path: str = None,
         callback=None,
@@ -754,12 +828,6 @@ class LogAnomalyAdapter(LogADCompAdapter):
             self.epochs,
             self.batch_size,
         )
-        optimizer = Optimizer(
-            filter(lambda p: p.requires_grad, self._model.model.parameters()),
-            lr=self.learning_rate,
-        )
-        global_step = 0
-        batch_step_coef = 2048 // self.batch_size # 2048 is the default/max batch size
 
         train_set = self.generate_inputs_by_instances(x_train, self.window)
         train_loader = TorchDataLoader(
@@ -767,8 +835,18 @@ class LogAnomalyAdapter(LogADCompAdapter):
         )
         vocab_size = self.vocab.vocab_size
 
+        optimizer = Optimizer(
+            filter(lambda p: p.requires_grad, model.model.parameters()),
+            lr=self.learning_rate,
+            lr_decay=self.learning_rate_decay,
+            lr_decay_step=len(train_loader),
+        )
+        self.log.debug("Scheduler decay %s", self.learning_rate_decay)
+
+        global_step = 0
+        batch_step_coef = 2048 // self.batch_size  # 2048 is the default/max batch size
         for epoch in range(self.epochs):
-            self._model.model.train()
+            model.model.train()
             start = time.strftime("%H:%M:%S")
             self.log.info(
                 "Epoch %d starting at %s with learning rate: %s",
@@ -781,11 +859,10 @@ class LogAnomalyAdapter(LogADCompAdapter):
             total_loss = 0
             last_printed_batch = 0
             for seq, label in tqdm(train_loader):
-                self._model.model.train()
                 seq = seq.to(device)
                 qual = F.one_hot(seq, vocab_size).sum(dim=1).float().to(device)
-                loss = self._model.forward((seq, qual, None), label.to(device))
-                total_loss += loss.data.cpu().numpy()
+                loss = model.forward((seq, qual, None), label.to(device))
+                total_loss += loss.item()
                 loss.backward()
                 if (batch_iter / batch_step_coef) % 100 == 0:
                     self.log.info(
@@ -799,60 +876,83 @@ class LogAnomalyAdapter(LogADCompAdapter):
                     last_printed_batch = batch_iter
                 batch_iter += 1
                 nn.utils.clip_grad_norm_(
-                    filter(lambda p: p.requires_grad, self._model.model.parameters()),
+                    filter(lambda p: p.requires_grad, model.model.parameters()),
                     max_norm=1,
                 )
                 optimizer.step()
-                self._model.model.zero_grad()
+                optimizer.zero_grad()
                 global_step += 1
             self.log.info("Epoch %d finished.", epoch + 1)
             if model_save_path is not None:
-                torch.save(self._model.model.state_dict(), model_save_path)
+                torch.save(model.model.state_dict(), model_save_path)
             if callback is not None:
-                callback(self._model, epoch)
+                callback(model, epoch)
         self.log.info("Training complete.")
+
+    def get_val_loss(self, model, val_loader: TorchDataLoader):
+        """
+        Compute the validation loss for the given model.
+        """
+        model.model.eval()
+        with torch.no_grad():
+            total_loss = 0
+            for seq, label in val_loader:
+                seq = seq.to(device)
+                qual = (
+                    F.one_hot(seq, self.vocab.vocab_size).sum(dim=1).float().to(device)
+                )
+                loss = model.forward((seq, qual, None), label.to(device))
+                total_loss += loss.item()
+            return total_loss
 
     def fit(self, x_train, y_train):
         """
         Fit the model using the provided training instances.
         (Note: For LogAnomaly, y_train is not used directly.)
         """
-        self.train(x_train)
+        self.train(self._model, x_train)
 
     def predict(self, x_test):
         return self._predict(self._model, x_test)
 
-    def _predict(self, model: LogAnomaly, x_test: List[Instance]):
+    def _generate_windows_and_labels(self, instances: np.ndarray[Instance]) -> tuple:
+        windows_list = []
+        labels_list = []
+        window_counts = []
+
+        for instance in instances:
+            seq = instance.sequence.copy()
+            pad_length = self.window + 1 - len(seq)
+            if pad_length > 0:
+                seq = seq + [self.vocab.PAD] * pad_length
+
+            # shape: [L]
+            seq_tensor = torch.tensor(seq, dtype=torch.long)
+            # Get sliding windows shape: [L - window + 1, window]
+            windows = seq_tensor.unfold(0, self.window, 1)[:-1]
+            # labels -> shape (L - window,) == (num_windows,)
+            labels = seq_tensor[self.window :]
+
+            # (window,) -> (num_windows, window)
+            windows_list.append(windows)
+            labels_list.append(labels)  # shape: (num_windows,)
+            window_counts.append(windows.shape[0])
+
+        # (total_windows, window)
+        all_windows = torch.cat(windows_list, dim=0)
+        # (total_windows,)
+        all_labels = torch.cat(labels_list, dim=0)
+
+        return all_windows, all_labels, window_counts
+
+    def _predict(self, model: LogAnomaly, x_test: np.ndarray[Instance]):
         vocab_size = self.vocab.vocab_size
 
         model.model.eval()
         with torch.no_grad():
-            windows_list = []
-            labels_list = []
-            window_counts = []
-
-            for instance in x_test:
-                seq = instance.sequence.copy()
-                pad_length = self.window + 1 - len(seq)
-                if pad_length > 0:
-                    seq = seq + [self.vocab.PAD] * pad_length
-
-                # shape: [L]
-                seq_tensor = torch.tensor(seq, dtype=torch.long, device=device)
-                # Get sliding windows shape: [L - window + 1, window]
-                windows = seq_tensor.unfold(0, self.window, 1)[:-1]
-                # labels -> shape (L - window,) == (num_windows,)
-                labels = seq_tensor[self.window :]
-
-                # (window,) -> (num_windows, window)
-                windows_list.append(windows)
-                labels_list.append(labels)  # shape: (num_windows,)
-                window_counts.append(windows.shape[0])
-
-            # (total_windows, window)
-            all_windows = torch.cat(windows_list, dim=0)
-            # (total_windows,)
-            all_labels = torch.cat(labels_list, dim=0)
+            all_windows, all_labels, window_counts = self._generate_windows_and_labels(
+                x_test
+            )
 
             batch_size = 1024
             outputs_list = []
