@@ -11,7 +11,7 @@ import tomli
 from adapters import model_adapters, DualTrialAdapter
 from dataloader import dataloaders
 from sempca.preprocessing import DataPaths
-from utils import Timed, calculate_metrics
+from utils import Timed, calculate_metrics, get_memory_usage
 
 pd.options.display.max_columns = None
 pd.options.display.max_rows = None
@@ -94,12 +94,14 @@ if __name__ == "__main__":
         label_file=config_dict["processed_labels"],
     )
     print(paths)
+    print(f"Base usage {get_memory_usage()}")
 
     dataloader = dataloaders[d_name](config_dict, paths)
     dataloader.get()
 
     model = model_adapters[model_name]()
     xs, ys = model.transform_representation(dataloader)
+    print(f"Transformed usage {get_memory_usage()}")
 
     if exists_and_not_empty(config_dict["train_hyperparameters"]):
         print("Found train hyperparameters")
@@ -132,12 +134,15 @@ if __name__ == "__main__":
 
         best_train_params = study.best_params
 
+        print(f"Pre GC usage {get_memory_usage()}")
         del x_train, y_train, x_val, y_val, x_test, y_test
         gc.collect()
+        print(f"Post GC usage {get_memory_usage()}")
     else:
         best_train_params = {}
 
     print("Best train params", best_train_params)
+    print(f"Post train params usage {get_memory_usage()}")
 
     if all(
         exists_and_not_empty(config_dict[x])
@@ -175,10 +180,13 @@ if __name__ == "__main__":
 
         best_params = study.best_params
 
+        print(f"Pre GC usage {get_memory_usage()}")
         del x_train, y_train, x_val, y_val, x_test, y_test
         gc.collect()
+        print(f"Post GC usage {get_memory_usage()}")
 
     print("Best params", best_params)
+    print(f"Post params usage {get_memory_usage()}")
 
     # Float offsets from 0.0 to 0.9 in steps of 0.1
     for offset in range(0, 10):
@@ -227,8 +235,10 @@ if __name__ == "__main__":
         )
         print(metrics_df)
 
+        print(f"Pre GC usage {get_memory_usage()}")
         del x_train, y_train, x_val, y_val, x_test, y_test, metrics
         gc.collect()
+        print(f"Post GC usage {get_memory_usage()}")
 
     dfs = []
     for i in range(10):
