@@ -518,7 +518,7 @@ class DeepLogAdapter(DualTrialAdapter):
             num_layers = trial.suggest_categorical("num_layers", [2])
             num_epochs = trial.suggest_categorical("num_epochs", [10])
             batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 512])
-            lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True, step=1e-4)
+            lr = trial.suggest_float("lr", 1e-4, 1e-2, step=1e-4)
 
             self.num_candidates = self.num_classes  # dummy value
             model = DeepLog(
@@ -573,8 +573,6 @@ class DeepLogAdapter(DualTrialAdapter):
             self.num_candidates = trial.suggest_int(
                 "num_candidates", 1, self.num_classes
             )
-
-            self.set_params(num_candidates=self.num_candidates, **(prev_params or {}))
 
             model = self._model  # Reuse already trained model if available
             y_pred = self._predict(model, x_val)
@@ -749,11 +747,7 @@ class LogAnomalyAdapter(DualTrialAdapter):
             self.num_candidates = trial.suggest_int(
                 "num_candidates", 1, self.num_classes
             )
-            # Set parameters and instantiate a new underlying model.
-            self.set_params(
-                num_candidates=self.num_candidates,
-                **(prev_params or {}),
-            )
+
             # Evaluate on the validation set.
             y_pred = self.predict(x_val)
             metrics = calculate_metrics(y_val, y_pred)
