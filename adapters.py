@@ -23,7 +23,7 @@ from sempca.utils import (
     update_instances,
 )
 from sempca.utils import tqdm
-from utils import calculate_metrics
+from utils import calculate_metrics, get_memory_usage
 
 
 class LogADCompAdapter(ABC):
@@ -376,7 +376,7 @@ class DeepLogAdapter(DualTrialAdapter):
         lr=0.001,
         window_size=10,
         input_size=1,
-        pruning_callback=None,
+        callbacks: Optional[List[Callable[[DeepLog, int], None]]] = None,
     ):
         self.log.info(
             "Starting training with window size: %d, batch size: %d, num_epochs: %d",
@@ -422,8 +422,9 @@ class DeepLogAdapter(DualTrialAdapter):
             elapsed_time = time.time() - start_time
             self.log.info("elapsed_time: {:.3f}s".format(elapsed_time))
 
-            if pruning_callback is not None:
-                pruning_callback(model, epoch)
+            if callbacks is not None:
+                for callback in callbacks:
+                    callback(model, epoch)
 
             # torch.save(model.state_dict(), last_model_output)
         self.log.info("Finished Training")
@@ -531,6 +532,9 @@ class DeepLogAdapter(DualTrialAdapter):
 
             val_loader = TorchDataLoader(val_set, batch_size=batch_size, shuffle=False)
 
+            def show_memory_usage(_m, e):
+                self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
+
             def pruning_callback(mod: DeepLog, epoch: int):
                 val_loss = self.get_val_loss(mod, val_loader)
                 self.log.info("Validation loss: %.4f", val_loss)
@@ -546,7 +550,7 @@ class DeepLogAdapter(DualTrialAdapter):
                 num_epochs=num_epochs,
                 batch_size=batch_size,
                 lr=lr,
-                pruning_callback=pruning_callback,
+                callbacks=[show_memory_usage, pruning_callback],
             )
 
             val_loss = self.get_val_loss(model, val_loader)
@@ -715,6 +719,9 @@ class LogAnomalyAdapter(DualTrialAdapter):
                 val_set, batch_size=self.batch_size, shuffle=False
             )
 
+            def show_memory_usage(_m, e):
+                self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
+
             def pruning_callback(mod: LogAnomaly, epoch: int):
                 with torch.no_grad():
                     val_loss = self.get_val_loss(mod, val_loader)
@@ -725,7 +732,7 @@ class LogAnomalyAdapter(DualTrialAdapter):
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
-            self.train(model, x_train, callback=pruning_callback)
+            self.train(model, x_train, callbacks=[show_memory_usage, pruning_callback])
             val_loss = self.get_val_loss(model, val_loader)
             return val_loss
 
@@ -816,7 +823,7 @@ class LogAnomalyAdapter(DualTrialAdapter):
         model: LogAnomaly,
         x_train: np.ndarray[Instance],
         model_save_path: str = None,
-        callback=None,
+        callbacks: Optional[List[Callable[[LogAnomaly, int], None]]] = None,
     ):
         """
         Train the LogAnomaly model.
@@ -889,8 +896,9 @@ class LogAnomalyAdapter(DualTrialAdapter):
             self.log.info("Epoch %d finished.", epoch + 1)
             if model_save_path is not None:
                 torch.save(model.model.state_dict(), model_save_path)
-            if callback is not None:
-                callback(model, epoch)
+            if callbacks is not None:
+                for callback in callbacks:
+                    callback(model, epoch)
         self.log.info("Training complete.")
 
     def get_val_loss(self, model, val_loader: TorchDataLoader):
@@ -1096,7 +1104,7 @@ class LogRobustAdapter(LogADCompAdapter):
         model: LogRobust,
         x_train: np.ndarray[Instance],
         y_train: np.ndarray[int],
-        callback: Optional[Callable[[LogRobust, int], None]] = None,
+        callbacks: Optional[List[Callable[[LogRobust, int], None]]] = None,
         model_save_path: str = None,
     ):
         """
@@ -1157,8 +1165,9 @@ class LogRobustAdapter(LogADCompAdapter):
                         loss.item(),
                     )
 
-            if callback is not None:
-                callback(model, epoch)
+            if callbacks is not None:
+                for callback in callbacks:
+                    callback(model, epoch)
 
             self.log.info("Training epoch %d finished." % epoch)
             if model_save_path:
@@ -1221,6 +1230,9 @@ class LogRobustAdapter(LogADCompAdapter):
 
             model = LogRobust(self.vocab, hidden_size, num_layers, device)
 
+            def show_memory_usage(_m, e):
+                self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
+
             def val_callback(model: LogRobust, epoch: int):
                 with torch.no_grad():
                     y_pred = self._predict(model, x_val)
@@ -1241,7 +1253,9 @@ class LogRobustAdapter(LogADCompAdapter):
                 learning_rate=self.learning_rate,
             )
 
-            self.train(model, x_train, y_train, callback=val_callback)
+            self.train(
+                model, x_train, y_train, callbacks=[show_memory_usage, val_callback]
+            )
             y_pred = self.predict(x_val)
             metrics = calculate_metrics(y_val, y_pred)
             return metrics["f1"]
