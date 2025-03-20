@@ -4,6 +4,9 @@ from typing import ContextManager, Union, Dict
 
 import numpy as np
 import psutil
+import torch
+
+from sempca.const import device
 
 
 class Timed(ContextManager):
@@ -85,6 +88,20 @@ def get_memory_usage():
         "vms": format_bytes(vms),
         "shared": format_bytes(shared),
     }
+
+
+def log_gpu_memory_usage(logger):
+    if torch.cuda.is_available():
+        allocd = torch.cuda.memory_allocated(device)
+        reserved = torch.cuda.memory_reserved(device)
+        total = torch.cuda.get_device_properties(0).total_memory
+        logger.debug(
+            "GPU usage: %d (%d) / %d MB - %.2f%%",
+            allocd // 1024**2,
+            reserved // 1024**2,
+            total // 1024**2,
+            allocd / total * 100,
+        )
 
 
 def calculate_metrics(y_true, y_pred) -> Dict[str, Union[int, float]]:

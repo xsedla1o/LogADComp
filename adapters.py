@@ -23,7 +23,7 @@ from sempca.utils import (
     update_instances,
 )
 from sempca.utils import tqdm
-from utils import calculate_metrics, get_memory_usage
+from utils import calculate_metrics, get_memory_usage, log_gpu_memory_usage
 
 
 class LogADCompAdapter(ABC):
@@ -267,17 +267,11 @@ class LogClusterAdapter(LogADCompAdapter):
         self._model.fit(x_train[y_train == 0, :])
 
 
-class DeepLogAdapter(DualTrialAdapter):
+class SemPCALSTMAdapter(DualTrialAdapter):
     def __init__(self, window=10):
         super().__init__()
-        self.log = get_logger("DeepLogAdapter")
+        self.log = get_logger("SemPCALSTMAdapter")
         self.window = window
-        # self.last_model_output = self.data_paths
-        self._model = None  # DeepLog()
-
-    @staticmethod
-    def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
-        return loader.get_instances()
 
     def get_event2index(self, x_train, x_test):
         """
@@ -321,6 +315,77 @@ class DeepLogAdapter(DualTrialAdapter):
         self.log.info("Embed size: %d in test dataset." % embed_size)
         return train_event2idx, test_event2idx
 
+    def _get_sliding_window_dataset(
+        self,
+        instances: np.ndarray[Instance],
+        pad_token: int,
+        normal_only: bool = False,
+        step: int = 1,
+        dtype: torch.dtype = torch.long,
+        input_dim: bool = False,
+    ) -> Tuple[TensorDataset, List[int]]:
+        """
+        Generate sliding windows and corresponding labels from a list of instances.
+
+        Parameters:
+          instances: List of Instance objects (each with a .sequence attribute).
+          pad_token: The token used for padding (e.g. self.vocab.PAD or -1).
+          normal_only: If True, only process instances with label "Normal".
+          step: Step size between windows.
+          dtype: The desired torch dtype (e.g. torch.long for LogAnomaly, torch.float for DeepLog).
+          input_dim: Whether to unsqueeze windows along the last dimension.
+
+        Returns:
+          A TensorDataset of windows and labels, and a list of window counts per instance.
+        """
+        windows_list = []
+        labels_list = []
+        window_counts = []
+        num_sessions = 0
+
+        for instance in instances:
+            if normal_only and instance.label != "Normal":
+                continue
+            num_sessions += 1
+
+            seq = instance.sequence
+            pad_length = self.window + 1 - len(seq)
+            if pad_length > 0:
+                seq = seq + [pad_token] * pad_length
+
+            # Convert to tensor using the specified dtype, shape: [L]
+            seq_tensor = torch.tensor(seq, dtype=dtype)
+            # Create sliding windows with the provided step, shape: [L - window + 1, window]
+            windows = seq_tensor.unfold(0, self.window, step)[:-1]
+            # labels -> shape (L - window,) == (num_windows,)
+            labels = seq_tensor[self.window :]
+
+            if input_dim:
+                windows = windows.unsqueeze(-1)  # e.g., to add a channel dimension
+
+            windows_list.append(windows)
+            labels_list.append(labels)
+            window_counts.append(windows.shape[0])
+
+        all_windows = torch.cat(windows_list, dim=0)
+        all_labels = torch.cat(labels_list, dim=0)
+        all_labels = all_labels.to(torch.long)
+        self.log.debug(
+            "Number of sessions: %d, windows: %d", num_sessions, len(all_windows)
+        )
+        return TensorDataset(all_windows, all_labels), window_counts
+
+
+class DeepLogAdapter(SemPCALSTMAdapter):
+    def __init__(self, window=10):
+        super().__init__(window)
+        self.log = get_logger("DeepLogAdapter")
+        self._model: Optional[DeepLog] = None
+
+    @staticmethod
+    def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
+        return loader.get_instances()
+
     def preprocess_split(
         self, x_train: NdArr, x_val: NdArr, x_test: NdArr
     ) -> Tuple[NdArr, NdArr, NdArr]:
@@ -335,36 +400,112 @@ class DeepLogAdapter(DualTrialAdapter):
 
         return x_train, x_val, x_test
 
-    def generate_inputs_by_instances(self, instances, window, step=1):
-        """
-        Generate batched inputs by given instances.
-        Parameters
-        ----------
-        instances: input insances for training.
-        window: windows size for sliding window in DeepLog
-        step: step size in DeepLog
-
-        Returns
-        -------
-        TensorDataset of training inputs and labels.
-        """
-        num_sessions = 0
-        inputs = []
-        outputs = []
-        for inst in instances:
-            if inst.label == "Normal":
-                num_sessions += 1
-                event_list = tuple(map(int, inst.sequence))
-                for i in range(0, len(event_list) - window, step):
-                    inputs.append(event_list[i : i + window])
-                    outputs.append(event_list[i + window])
-        self.log.debug("Number of sessions: %s", num_sessions)
-        self.log.debug("Number of seqs: %s", len(inputs))
-        dataset = TensorDataset(
-            torch.tensor(inputs, dtype=torch.float32),
-            torch.tensor(outputs, dtype=torch.long),
+    def get_training_trial_objective(self, x_train, y_train, x_val, y_val):
+        """Optuna objective function to optimize training hyperparameters."""
+        assert self.num_classes is not None, "Call split preprocessing first"
+        val_set, _ = self._get_sliding_window_dataset(
+            x_train, -1, normal_only=True, dtype=torch.float32
         )
-        return dataset
+
+        def objective(trial: optuna.Trial):
+            hidden_size = trial.suggest_categorical("hidden_size", [64])
+            num_layers = trial.suggest_categorical("num_layers", [2])
+            num_epochs = trial.suggest_categorical("num_epochs", [10])
+            batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 512])
+            lr = trial.suggest_float("lr", 1e-4, 1e-2, step=1e-4)
+
+            self.num_candidates = self.num_classes  # dummy value
+            model = DeepLog(
+                input_dim=1,
+                hidden=hidden_size,
+                layer=num_layers,
+                num_classes=self.num_classes,
+            )
+
+            val_loader = TorchDataLoader(val_set, batch_size=batch_size, shuffle=False)
+
+            def show_memory_usage(_m, e):
+                self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
+
+            def pruning_callback(mod: DeepLog, epoch: int):
+                val_loss = self.get_val_loss(mod, val_loader)
+                self.log.info("Validation loss: %.4f", val_loss)
+
+                trial.report(val_loss, epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            self.train(
+                x_train,
+                y_train,
+                model=model,
+                num_epochs=num_epochs,
+                batch_size=batch_size,
+                lr=lr,
+                callbacks=[
+                    show_memory_usage,
+                    lambda _, _b: log_gpu_memory_usage(self.log),
+                    pruning_callback,
+                ],
+            )
+            val_loss = self.get_val_loss(model, val_loader)
+            return val_loss
+
+        return objective
+
+    def get_trial_objective(
+        self, x_train, y_train, x_val, y_val, prev_params: dict = None
+    ):
+        """Objective function for tuning evaluation-specific hyperparameters."""
+        assert self.num_classes is not None, "Call split preprocessing first"
+
+        self.set_params(**(prev_params or {}))
+        self.train(
+            x_train,
+            y_train,
+            model=self._model,
+            num_epochs=self.num_epochs,
+            batch_size=self.batch_size,
+            lr=self.lr,
+        )
+
+        def objective(trial: optuna.Trial):
+            self.num_candidates = trial.suggest_int(
+                "num_candidates", 1, self.num_classes
+            )
+
+            y_pred = self.predict(x_val)
+            m = calculate_metrics(y_val, y_pred)
+            return m["f1"]
+
+        return objective
+
+    def set_params(
+        self,
+        input_dim: int = 1,
+        hidden_size: int = 6,
+        num_layers: int = 2,
+        num_candidates: int = 5,
+        num_epochs: int = 5,
+        batch_size: int = 32,
+        lr: float = 0.001,
+    ):
+        assert self.num_classes is not None, "Call split preprocessing first"
+        self._model = DeepLog(input_dim, hidden_size, num_layers, self.num_classes)
+        self.num_candidates = num_candidates
+        self.num_epochs = num_epochs
+        self.batch_size = batch_size
+        self.lr = lr
+
+    def fit(self, x_train, y_train):
+        self.train(
+            x_train,
+            y_train,
+            model=self._model,
+            num_epochs=self.num_epochs,
+            batch_size=self.batch_size,
+            lr=self.lr,
+        )
 
     def train(
         self,
@@ -386,8 +527,10 @@ class DeepLogAdapter(DualTrialAdapter):
         )
         self.log.info("Model: %s", model)
         self.log.info("Number of candidates: %d", self.num_candidates)
-        x_train = self.generate_inputs_by_instances(x_train, window=window_size)
-        train_loader = TorchDataLoader(x_train, batch_size=batch_size, shuffle=False)
+        train_set, _ = self._get_sliding_window_dataset(
+            x_train, -1, normal_only=True, dtype=torch.float32
+        )
+        train_loader = TorchDataLoader(train_set, batch_size=batch_size, shuffle=False)
         model = model.to(device)
 
         # Loss and optimizer
@@ -444,61 +587,33 @@ class DeepLogAdapter(DualTrialAdapter):
     def predict(self, x_test):
         return self._predict(self._model, x_test)
 
-    def _predict(self, model: DeepLog, x_test: List[Instance]):
+    def _predict(self, model: DeepLog, x_test: np.ndarray[Instance]):
         model.to(device)
         with torch.no_grad():
-            windows_list = []
-            labels_list = []
-            window_counts = []
+            dataset, window_counts = self._get_sliding_window_dataset(
+                x_test,
+                pad_token=-1,
+                dtype=torch.float,
+                input_dim=True,
+            )
+            loader = TorchDataLoader(dataset, batch_size=1024, shuffle=False)
 
-            for instance in x_test:
-                seq = instance.sequence.copy()
-                pad_length = self.window + 1 - len(seq)
-                if pad_length > 0:
-                    seq = seq + [-1] * pad_length
+            outputs = []
+            for seqs, labels in loader:
+                seqs, labels = seqs.to(device), labels.to(device)
+                # (batch_size, num_classes)
+                predictions = model(seqs)
+                # (batch_size, num_classes) -> (batch_size, num_candidates)
+                topk_indices = torch.topk(
+                    predictions, self.num_candidates, dim=1
+                ).indices
+                # (batch_size,)
+                matches = (topk_indices == labels.unsqueeze(1)).any(dim=1)
+                outputs.append(matches.cpu())
 
-                # shape: [L]
-                seq_tensor = torch.tensor(seq, dtype=torch.float)
-                # Get sliding windows shape: [L - window + 1, window]
-                windows = seq_tensor.unfold(0, self.window, 1)[:-1]
-                # labels -> shape (L - window,) == (num_windows,)
-                labels = seq_tensor[self.window :]
+            log_gpu_memory_usage(self.log)
 
-                # (window, 1) -> (num_windows, window, 1)
-                windows_list.append(windows.unsqueeze(-1))
-                labels_list.append(labels)  # shape: (num_windows,)
-                window_counts.append(windows.shape[0])
-
-            # (total_windows, window, 1)
-            all_windows = torch.cat(windows_list, dim=0)
-            # (total_windows,)
-            all_labels = torch.cat(labels_list, dim=0)
-
-            batch_size = 1024
-            outputs_list = []
-            for i in range(0, all_windows.size(0), batch_size):
-                batch_windows = all_windows[i : i + batch_size].to(device)
-                batch_outputs = model(batch_windows)  # (batch_size, num_classes)
-                outputs_list.append(batch_outputs)
-
-            all_outputs = torch.cat(outputs_list, dim=0)
-            # (total_windows, num_classes) -> (total_windows, num_candidates)
-            topk_indices = torch.topk(all_outputs, self.num_candidates, dim=1).indices
-            # (total_windows,)
-            topk_indices = topk_indices.to(all_labels.device)
-            matches = (topk_indices == all_labels.unsqueeze(1)).any(dim=1)
-
-            if torch.cuda.is_available():
-                allocd = torch.cuda.memory_allocated(device)
-                reserved = torch.cuda.memory_reserved(device)
-                total = torch.cuda.get_device_properties(0).total_memory
-                self.log.debug(
-                    "GPU usage: %d (%d) / %d MB - %.2f%%",
-                    allocd // 1024**2,
-                    reserved // 1024**2,
-                    total // 1024**2,
-                    allocd / total * 100,
-                )
+            matches = torch.cat(outputs, dim=0)
 
             # Reassemble the per-instance results using the window_counts.
             y_pred = []
@@ -508,117 +623,14 @@ class DeepLogAdapter(DualTrialAdapter):
                 sample_pred = 0 if seq_matches.all().item() else 1
                 y_pred.append(sample_pred)
                 start_idx += count
+
         return np.asarray(y_pred)
 
-    def get_training_trial_objective(self, x_train, y_train, x_val, y_val):
-        """Optuna objective function to optimize training hyperparameters."""
-        assert self.num_classes is not None, "Call split preprocessing first"
-        val_set = self.generate_inputs_by_instances(x_val, self.window)
 
-        def objective(trial: optuna.Trial):
-            hidden_size = trial.suggest_categorical("hidden_size", [64])
-            num_layers = trial.suggest_categorical("num_layers", [2])
-            num_epochs = trial.suggest_categorical("num_epochs", [10])
-            batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 512])
-            lr = trial.suggest_float("lr", 1e-4, 1e-2, step=1e-4)
-
-            self.num_candidates = self.num_classes  # dummy value
-            model = DeepLog(
-                input_dim=1,
-                hidden=hidden_size,
-                layer=num_layers,
-                num_classes=self.num_classes,
-            )
-
-            val_loader = TorchDataLoader(val_set, batch_size=batch_size, shuffle=False)
-
-            def show_memory_usage(_m, e):
-                self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
-
-            def pruning_callback(mod: DeepLog, epoch: int):
-                val_loss = self.get_val_loss(mod, val_loader)
-                self.log.info("Validation loss: %.4f", val_loss)
-
-                trial.report(val_loss, epoch)
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
-
-            self.train(
-                x_train,
-                y_train,
-                model=model,
-                num_epochs=num_epochs,
-                batch_size=batch_size,
-                lr=lr,
-                callbacks=[show_memory_usage, pruning_callback],
-            )
-
-            val_loss = self.get_val_loss(model, val_loader)
-            return val_loss
-
-        return objective
-
-    def get_trial_objective(
-        self, x_train, y_train, x_val, y_val, prev_params: dict = None
-    ):
-        """Objective function for tuning evaluation-specific hyperparameters."""
-        assert self.num_classes is not None, "Call split preprocessing first"
-
-        self.set_params(**(prev_params or {}))
-        self.train(
-            x_train,
-            y_train,
-            model=self._model,
-            num_epochs=self.num_epochs,
-            batch_size=self.batch_size,
-            lr=self.lr,
-        )
-
-        def objective(trial: optuna.Trial):
-            self.num_candidates = trial.suggest_int(
-                "num_candidates", 1, self.num_classes
-            )
-
-            model = self._model  # Reuse already trained model if available
-            y_pred = self._predict(model, x_val)
-            m = calculate_metrics(y_val, y_pred)
-            return m["f1"]
-
-        return objective
-
-    def set_params(
-        self,
-        input_dim: int = 1,
-        hidden_size: int = 6,
-        num_layers: int = 2,
-        num_candidates: int = 5,
-        num_epochs: int = 5,
-        batch_size: int = 32,
-        lr: float = 0.001,
-    ):
-        assert self.num_classes is not None, "Call split preprocessing first"
-        self._model = DeepLog(input_dim, hidden_size, num_layers, self.num_classes)
-        self.num_candidates = num_candidates
-        self.num_epochs = num_epochs
-        self.batch_size = batch_size
-        self.lr = lr
-
-    def fit(self, x_train, y_train):
-        self.train(
-            x_train,
-            y_train,
-            model=self._model,
-            num_epochs=self.num_epochs,
-            batch_size=self.batch_size,
-            lr=self.lr,
-        )
-
-
-class LogAnomalyAdapter(DualTrialAdapter):
+class LogAnomalyAdapter(SemPCALSTMAdapter):
     def __init__(self, window=10):
-        super().__init__()
+        super().__init__(window)
         self.log = get_logger("LogAnomalyAdapter")
-        self.window = window
         self._model: Optional[LogAnomaly] = None
         self.vocab: Optional[Vocab] = None
         self.num_classes = None  # Must be set via preprocessing splits.
@@ -628,56 +640,10 @@ class LogAnomalyAdapter(DualTrialAdapter):
         self.learning_rate = None
 
     def transform_representation(self, loader: DataLoader) -> tuple:
-        """
-        Use the DataLoader's unified method to obtain instances and labels.
-        (Expects the DataLoader to implement a 'get_instances' method.)
-        """
         embedding, instances = loader.get_embedding_and_instances()
         self.vocab = Vocab()
         self.vocab.load_from_dict(embedding)
         return instances
-
-    def get_event2index(self, x_train, x_test):
-        """
-        Calculate unique events in pre & post for event count vector calculation.
-        :param x_train: pre data, including training set and validation set(if has)
-        :param x_test: post data, mostly testing set
-        :return: mappings
-        """
-        self.log.info("Getting train instances' event-idx mapping.")
-
-        train_event2idx = {}
-        test_event2idx = {}
-
-        events = set()
-        for inst in x_train:
-            events.update((int(event) for event in inst.sequence))
-        train_events = sorted(list(events))
-
-        embed_size = len(train_events)
-        self.log.info("Embed size: %d in train dataset." % embed_size)
-        for idx, event in enumerate(train_events):
-            train_event2idx[event] = idx
-
-        self.log.info("Getting test instances' event-idx mapping.")
-
-        events = set()
-        for inst in x_test:
-            events.update((int(event) for event in inst.sequence))
-        test_events = sorted(list(events))
-
-        base = len(train_events)
-        increment = 0
-        for event in test_events:
-            if event not in train_events:
-                train_events.append(event)
-                test_event2idx[event] = base + increment
-                increment += 1
-            else:
-                test_event2idx[event] = train_event2idx[event]
-        embed_size = len(train_events)
-        self.log.info("Embed size: %d in test dataset." % embed_size)
-        return train_event2idx, test_event2idx
 
     def preprocess_split(
         self, x_train: np.ndarray, x_val: np.ndarray, x_test: np.ndarray
@@ -690,6 +656,7 @@ class LogAnomalyAdapter(DualTrialAdapter):
             np.concatenate((x_train, x_val), axis=0), x_test
         )
         self.num_classes = len(train_e2i)
+
         x_train, x_test, _ = update_instances(x_train, x_test)
         x_train, x_val, _ = update_instances(x_train, x_val)
 
@@ -697,6 +664,10 @@ class LogAnomalyAdapter(DualTrialAdapter):
 
     def get_training_trial_objective(self, x_train, y_train, x_val, y_val):
         """Optuna objective function to optimize training hyperparameters"""
+        assert self.num_classes is not None, "Call split preprocessing first"
+        val_set, _ = self._get_sliding_window_dataset(
+            x_train, self.vocab.PAD, normal_only=True
+        )
 
         def objective(trial: optuna.Trial):
             """Return the validation loss for a given set of hyperparameters."""
@@ -714,7 +685,6 @@ class LogAnomalyAdapter(DualTrialAdapter):
             )
 
             model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
-            val_set = self.generate_inputs_by_instances(x_val, self.window)
             val_loader = TorchDataLoader(
                 val_set, batch_size=self.batch_size, shuffle=False
             )
@@ -725,14 +695,21 @@ class LogAnomalyAdapter(DualTrialAdapter):
             def pruning_callback(mod: LogAnomaly, epoch: int):
                 with torch.no_grad():
                     val_loss = self.get_val_loss(mod, val_loader)
-
                 self.log.info("Validation loss: %.4f", val_loss)
 
                 trial.report(val_loss, epoch)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
-            self.train(model, x_train, callbacks=[show_memory_usage, pruning_callback])
+            self.train(
+                model,
+                x_train,
+                callbacks=[
+                    show_memory_usage,
+                    lambda _, _b: log_gpu_memory_usage(self.log),
+                    pruning_callback,
+                ],
+            )
             val_loss = self.get_val_loss(model, val_loader)
             return val_loss
 
@@ -746,17 +723,16 @@ class LogAnomalyAdapter(DualTrialAdapter):
         This implementation reuses the adapter instance and only instantiates a new underlying
         LogAnomaly model when set_params is called.
         """
+        assert self.num_classes is not None, "Call split preprocessing first"
 
         self.set_params(**(prev_params or {}))
         self.train(self._model, x_train)
 
         def objective(trial):
-            # Hyperparameter suggestions.
             self.num_candidates = trial.suggest_int(
                 "num_candidates", 1, self.num_classes
             )
 
-            # Evaluate on the validation set.
             y_pred = self.predict(x_val)
             metrics = calculate_metrics(y_val, y_pred)
             return metrics["f1"]
@@ -787,36 +763,11 @@ class LogAnomalyAdapter(DualTrialAdapter):
         self._model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
         self.log.info("LogAnomaly instantiated: %s", self._model.model)
 
-    def generate_inputs_by_instances(self, instances, window, step=1) -> TensorDataset:
+    def fit(self, x_train, y_train):
         """
-        Generate batched inputs by given instances.
-        Parameters
-        ----------
-        instances: input insances for training.
-        window: windows size for sliding window in DeepLog
-        step: step size in DeepLog
-
-        Returns
-        -------
-        TensorDataset of training inputs and labels.
+        Fit the model using the provided training instances.
         """
-        num_sessions = 0
-        inputs = []
-        outputs = []
-        for inst in instances:
-            if inst.label == "Normal":
-                num_sessions += 1
-                event_list = tuple(map(int, inst.sequence))
-                for i in range(0, len(event_list) - window, step):
-                    inputs.append(event_list[i : i + window])
-                    outputs.append(event_list[i + window])
-        self.log.debug("Number of sessions: %s", num_sessions)
-        self.log.debug("Number of seqs: %s", len(inputs))
-        dataset = TensorDataset(
-            torch.tensor(inputs, dtype=torch.long),
-            torch.tensor(outputs, dtype=torch.long),
-        )
-        return dataset
+        self.train(self._model, x_train)
 
     def train(
         self,
@@ -840,7 +791,9 @@ class LogAnomalyAdapter(DualTrialAdapter):
             self.batch_size,
         )
 
-        train_set = self.generate_inputs_by_instances(x_train, self.window)
+        train_set, _ = self._get_sliding_window_dataset(
+            x_train, self.vocab.PAD, normal_only=True
+        )
         train_loader = TorchDataLoader(
             train_set, batch_size=self.batch_size, shuffle=True
         )
@@ -873,8 +826,10 @@ class LogAnomalyAdapter(DualTrialAdapter):
                 seq = seq.to(device)
                 qual = F.one_hot(seq, vocab_size).sum(dim=1).float().to(device)
                 loss = model.forward((seq, qual, None), label.to(device))
+
                 total_loss += loss.item()
                 loss.backward()
+
                 if (batch_iter / batch_step_coef) % 100 == 0:
                     self.log.info(
                         "Step:%d, Epoch:%d, Batch:%d, avg loss:%.2f",
@@ -885,13 +840,15 @@ class LogAnomalyAdapter(DualTrialAdapter):
                     )
                     total_loss = 0
                     last_printed_batch = batch_iter
-                batch_iter += 1
+
                 nn.utils.clip_grad_norm_(
                     filter(lambda p: p.requires_grad, model.model.parameters()),
                     max_norm=1,
                 )
                 optimizer.step()
                 optimizer.zero_grad()
+
+                batch_iter += 1
                 global_step += 1
             self.log.info("Epoch %d finished.", epoch + 1)
             if model_save_path is not None:
@@ -917,83 +874,39 @@ class LogAnomalyAdapter(DualTrialAdapter):
                 total_loss += loss.item()
             return total_loss
 
-    def fit(self, x_train, y_train):
-        """
-        Fit the model using the provided training instances.
-        (Note: For LogAnomaly, y_train is not used directly.)
-        """
-        self.train(self._model, x_train)
-
     def predict(self, x_test):
         return self._predict(self._model, x_test)
-
-    def _generate_windows_and_labels(self, instances: np.ndarray[Instance]) -> tuple:
-        windows_list = []
-        labels_list = []
-        window_counts = []
-
-        for instance in instances:
-            seq = instance.sequence.copy()
-            pad_length = self.window + 1 - len(seq)
-            if pad_length > 0:
-                seq = seq + [self.vocab.PAD] * pad_length
-
-            # shape: [L]
-            seq_tensor = torch.tensor(seq, dtype=torch.long)
-            # Get sliding windows shape: [L - window + 1, window]
-            windows = seq_tensor.unfold(0, self.window, 1)[:-1]
-            # labels -> shape (L - window,) == (num_windows,)
-            labels = seq_tensor[self.window :]
-
-            # (window,) -> (num_windows, window)
-            windows_list.append(windows)
-            labels_list.append(labels)  # shape: (num_windows,)
-            window_counts.append(windows.shape[0])
-
-        # (total_windows, window)
-        all_windows = torch.cat(windows_list, dim=0)
-        # (total_windows,)
-        all_labels = torch.cat(labels_list, dim=0)
-
-        return all_windows, all_labels, window_counts
 
     def _predict(self, model: LogAnomaly, x_test: np.ndarray[Instance]):
         vocab_size = self.vocab.vocab_size
 
         model.model.eval()
         with torch.no_grad():
-            all_windows, all_labels, window_counts = self._generate_windows_and_labels(
-                x_test
+            dataset, window_counts = self._get_sliding_window_dataset(
+                x_test, pad_token=self.vocab.PAD, dtype=torch.long
             )
 
-            batch_size = 1024
-            outputs_list = []
-            for i in range(0, all_windows.size(0), batch_size):
-                batch_windows = all_windows[i : i + batch_size].to(device)
-                qual = (
-                    F.one_hot(batch_windows, vocab_size).sum(dim=1).float().to(device)
-                )
-                batch_outputs = model.model((batch_windows, qual, None))
-                outputs_list.append(batch_outputs)
+            loader = TorchDataLoader(dataset, batch_size=1024, shuffle=False)
 
-            all_outputs = torch.cat(outputs_list, dim=0)
-            # (total_windows, num_classes) -> (total_windows, num_candidates)
-            topk_indices = torch.topk(all_outputs, self.num_candidates, dim=1).indices
-            # (total_windows,)
-            topk_indices = topk_indices.to(all_labels.device)
-            matches = (topk_indices == all_labels.unsqueeze(1)).any(dim=1)
+            outputs = []
+            for seqs, labels in loader:
+                seqs, labels = seqs.to(device), labels.to(device)
+                qual = F.one_hot(seqs, vocab_size).sum(dim=1).float().to(device)
 
-            if torch.cuda.is_available():
-                allocd = torch.cuda.memory_allocated(device)
-                reserved = torch.cuda.memory_reserved(device)
-                total = torch.cuda.get_device_properties(0).total_memory
-                self.log.debug(
-                    "GPU usage: %d (%d) / %d MB - %.2f%%",
-                    allocd // 1024**2,
-                    reserved // 1024**2,
-                    total // 1024**2,
-                    allocd / total * 100,
-                )
+                predictions = model.model((seqs, qual, None))
+
+                # (batch_size, num_classes) -> (batch_size, num_candidates)
+                topk_indices = torch.topk(
+                    predictions, self.num_candidates, dim=1
+                ).indices
+                # (batch_size,)
+                matches = (topk_indices == labels.unsqueeze(1)).any(dim=1)
+
+                outputs.append(matches.cpu())
+
+            matches = torch.cat(outputs, dim=0)
+
+            log_gpu_memory_usage(self.log)
 
             # Reassemble the per-instance results using the window_counts.
             y_pred = []
