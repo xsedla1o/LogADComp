@@ -1238,6 +1238,7 @@ class LogRobustAdapter(LogADCompAdapter):
                     y_pred = self._predict(model, x_val)
 
                 metrics = calculate_metrics(y_val, y_pred)
+                self.log.info("Validation F1: %.4f", metrics["f1"])
 
                 trial.report(metrics["f1"], epoch)
                 if trial.should_prune():
