@@ -381,6 +381,7 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         super().__init__(window)
         self.log = get_logger("DeepLogAdapter")
         self._model: Optional[DeepLog] = None
+        self.pad = 0
 
     @staticmethod
     def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
@@ -392,7 +393,10 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         train_e2i, _test_e2i = self.get_event2index(
             np.concatenate((x_train, x_val), axis=0), x_test
         )
+        train_e2i = {k: v + 1 for k, v in train_e2i.items()}
+        train_e2i["PAD"] = 0
         self.num_classes = len(train_e2i)
+        self.log.info("Num classes after padding %d", self.num_classes)
 
         update_sequences(x_train, train_e2i)
         update_sequences(x_val, train_e2i)
@@ -404,7 +408,7 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         """Optuna objective function to optimize training hyperparameters."""
         assert self.num_classes is not None, "Call split preprocessing first"
         val_set, _ = self._get_sliding_window_dataset(
-            x_train, -1, normal_only=True, dtype=torch.float32
+            x_train, self.pad, normal_only=True, dtype=torch.float32
         )
 
         def objective(trial: optuna.Trial):
@@ -528,7 +532,7 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         self.log.info("Model: %s", model)
         self.log.info("Number of candidates: %d", self.num_candidates)
         train_set, _ = self._get_sliding_window_dataset(
-            x_train, -1, normal_only=True, dtype=torch.float32
+            x_train, self.pad, normal_only=True, dtype=torch.float32
         )
         train_loader = TorchDataLoader(train_set, batch_size=batch_size, shuffle=False)
         model = model.to(device)
@@ -592,7 +596,7 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         with torch.no_grad():
             dataset, window_counts = self._get_sliding_window_dataset(
                 x_test,
-                pad_token=-1,
+                pad_token=self.pad,
                 dtype=torch.float,
                 input_dim=True,
             )
