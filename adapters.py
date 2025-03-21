@@ -267,7 +267,7 @@ class LogClusterAdapter(LogADCompAdapter):
         self._model.fit(x_train[y_train == 0, :])
 
 
-class SemPCALSTMAdapter(DualTrialAdapter):
+class SemPCALSTMAdapter(DualTrialAdapter, ABC):
     def __init__(self, window=10):
         super().__init__()
         self.log = get_logger("SemPCALSTMAdapter")
@@ -315,7 +315,7 @@ class SemPCALSTMAdapter(DualTrialAdapter):
         self.log.info("Embed size: %d in test dataset." % embed_size)
         return train_event2idx, test_event2idx
 
-    def _get_sliding_window_dataset(
+    def get_sliding_window_dataset(
         self,
         instances: np.ndarray[Instance],
         pad_token: int,
@@ -377,11 +377,14 @@ class SemPCALSTMAdapter(DualTrialAdapter):
 
 
 class DeepLogAdapter(SemPCALSTMAdapter):
-    def __init__(self, window=10):
+    def __init__(self, window=10, in_size=1):
         super().__init__(window)
         self.log = get_logger("DeepLogAdapter")
         self._model: Optional[DeepLog] = None
         self.pad = 0
+
+        self.window = window
+        self.in_size = in_size
 
     @staticmethod
     def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
@@ -407,26 +410,32 @@ class DeepLogAdapter(SemPCALSTMAdapter):
     def get_training_trial_objective(self, x_train, y_train, x_val, y_val):
         """Optuna objective function to optimize training hyperparameters."""
         assert self.num_classes is not None, "Call split preprocessing first"
-        val_set, _ = self._get_sliding_window_dataset(
+        train_set, _ = self.get_sliding_window_dataset(
             x_train, self.pad, normal_only=True, dtype=torch.float32
+        )
+        val_set, _ = self.get_sliding_window_dataset(
+            x_val, self.pad, normal_only=True, dtype=torch.float32
         )
 
         def objective(trial: optuna.Trial):
             hidden_size = trial.suggest_categorical("hidden_size", [64])
             num_layers = trial.suggest_categorical("num_layers", [2])
-            num_epochs = trial.suggest_categorical("num_epochs", [10])
-            batch_size = trial.suggest_categorical("batch_size", [32, 64, 128, 512])
-            lr = trial.suggest_float("lr", 1e-4, 1e-2, step=1e-4)
+            self.num_epochs = trial.suggest_categorical("num_epochs", [10])
+            self.batch_size = trial.suggest_categorical(
+                "batch_size", [32, 64, 128, 512]
+            )
+            self.lr = trial.suggest_float("lr", 1e-4, 1e-2, step=1e-4)
 
             self.num_candidates = self.num_classes  # dummy value
             model = DeepLog(
-                input_dim=1,
+                input_dim=self.in_size,
                 hidden=hidden_size,
                 layer=num_layers,
                 num_classes=self.num_classes,
             )
-
-            val_loader = TorchDataLoader(val_set, batch_size=batch_size, shuffle=False)
+            val_loader = TorchDataLoader(
+                val_set, batch_size=self.batch_size, shuffle=False
+            )
 
             def show_memory_usage(_m, e):
                 self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
@@ -440,12 +449,8 @@ class DeepLogAdapter(SemPCALSTMAdapter):
                     raise optuna.TrialPruned()
 
             self.train(
-                x_train,
-                y_train,
-                model=model,
-                num_epochs=num_epochs,
-                batch_size=batch_size,
-                lr=lr,
+                model,
+                train_set,
                 callbacks=[
                     show_memory_usage,
                     lambda _, _b: log_gpu_memory_usage(self.log),
@@ -464,14 +469,10 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         assert self.num_classes is not None, "Call split preprocessing first"
 
         self.set_params(**(prev_params or {}))
-        self.train(
-            x_train,
-            y_train,
-            model=self._model,
-            num_epochs=self.num_epochs,
-            batch_size=self.batch_size,
-            lr=self.lr,
+        train_set, _ = self.get_sliding_window_dataset(
+            x_train, self.pad, normal_only=True, dtype=torch.float32
         )
+        self.train(self._model, train_set)
 
         def objective(trial: optuna.Trial):
             self.num_candidates = trial.suggest_int(
@@ -487,10 +488,10 @@ class DeepLogAdapter(SemPCALSTMAdapter):
     def set_params(
         self,
         input_dim: int = 1,
-        hidden_size: int = 6,
+        hidden_size: int = 64,
         num_layers: int = 2,
         num_candidates: int = 5,
-        num_epochs: int = 5,
+        num_epochs: int = 10,
         batch_size: int = 32,
         lr: float = 0.001,
     ):
@@ -502,48 +503,38 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         self.lr = lr
 
     def fit(self, x_train, y_train):
-        self.train(
-            x_train,
-            y_train,
-            model=self._model,
-            num_epochs=self.num_epochs,
-            batch_size=self.batch_size,
-            lr=self.lr,
+        train_set, _ = self.get_sliding_window_dataset(
+            x_train, self.pad, normal_only=True, dtype=torch.float32
         )
+        self.train(self._model, train_set)
 
     def train(
         self,
-        x_train,
-        _y_train,
         model: DeepLog,
-        num_epochs=5,
-        batch_size=32,
-        lr=0.001,
-        window_size=10,
-        input_size=1,
+        train_set: TensorDataset,
+        model_save_path: str = None,
         callbacks: Optional[List[Callable[[DeepLog, int], None]]] = None,
     ):
         self.log.info(
             "Starting training with window size: %d, batch size: %d, num_epochs: %d",
-            window_size,
-            batch_size,
-            num_epochs,
+            self.window,
+            self.batch_size,
+            self.num_epochs,
         )
         self.log.info("Model: %s", model)
         self.log.info("Number of candidates: %d", self.num_candidates)
-        train_set, _ = self._get_sliding_window_dataset(
-            x_train, self.pad, normal_only=True, dtype=torch.float32
+        train_loader = TorchDataLoader(
+            train_set, batch_size=self.batch_size, shuffle=False
         )
-        train_loader = TorchDataLoader(train_set, batch_size=batch_size, shuffle=False)
         model = model.to(device)
 
         # Loss and optimizer
         criterion = nn.CrossEntropyLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        optimizer = torch.optim.Adam(model.parameters(), lr=self.lr)
 
         total_step = len(train_loader)
         start_time = time.time()
-        for epoch in range(num_epochs):
+        for epoch in range(self.num_epochs):
             model.train()
             start = time.strftime("%H:%M:%S")
             self.log.info(
@@ -553,7 +544,7 @@ class DeepLogAdapter(SemPCALSTMAdapter):
             train_loss = 0
             for seq, label in tqdm(train_loader):
                 # Forward pass
-                seq = seq.view(-1, window_size, input_size).to(device)
+                seq = seq.view(-1, self.window, self.in_size).to(device)
                 output = model(seq)
                 loss = criterion(output, label.to(device))
                 # Backward
@@ -563,17 +554,17 @@ class DeepLogAdapter(SemPCALSTMAdapter):
                 optimizer.step()
             self.log.info(
                 "Epoch [{}/{}], train_loss: {:.4f}".format(
-                    epoch + 1, num_epochs, train_loss / total_step
+                    epoch + 1, self.num_epochs, train_loss / total_step
                 )
             )
             elapsed_time = time.time() - start_time
             self.log.info("elapsed_time: {:.3f}s".format(elapsed_time))
 
+            if model_save_path is not None:
+                torch.save(model.model.state_dict(), model_save_path)
             if callbacks is not None:
                 for callback in callbacks:
                     callback(model, epoch)
-
-            # torch.save(model.state_dict(), last_model_output)
         self.log.info("Finished Training")
 
     def get_val_loss(self, model, val_loader):
@@ -594,11 +585,8 @@ class DeepLogAdapter(SemPCALSTMAdapter):
     def _predict(self, model: DeepLog, x_test: np.ndarray[Instance]):
         model.to(device)
         with torch.no_grad():
-            dataset, window_counts = self._get_sliding_window_dataset(
-                x_test,
-                pad_token=self.pad,
-                dtype=torch.float,
-                input_dim=True,
+            dataset, window_counts = self.get_sliding_window_dataset(
+                x_test, pad_token=self.pad, dtype=torch.float, input_dim=True
             )
             loader = TorchDataLoader(dataset, batch_size=1024, shuffle=False)
 
@@ -669,8 +657,11 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
     def get_training_trial_objective(self, x_train, y_train, x_val, y_val):
         """Optuna objective function to optimize training hyperparameters"""
         assert self.num_classes is not None, "Call split preprocessing first"
-        val_set, _ = self._get_sliding_window_dataset(
+        train_set, _ = self.get_sliding_window_dataset(
             x_train, self.vocab.PAD, normal_only=True
+        )
+        val_set, _ = self.get_sliding_window_dataset(
+            x_val, self.vocab.PAD, normal_only=True
         )
 
         def objective(trial: optuna.Trial):
@@ -697,8 +688,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
 
             def pruning_callback(mod: LogAnomaly, epoch: int):
-                with torch.no_grad():
-                    val_loss = self.get_val_loss(mod, val_loader)
+                val_loss = self.get_val_loss(mod, val_loader)
                 self.log.info("Validation loss: %.4f", val_loss)
 
                 trial.report(val_loss, epoch)
@@ -707,7 +697,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
 
             self.train(
                 model,
-                x_train,
+                train_set,
                 callbacks=[
                     show_memory_usage,
                     lambda _, _b: log_gpu_memory_usage(self.log),
@@ -722,15 +712,14 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
     def get_trial_objective(
         self, x_train, y_train, x_val, y_val, prev_params: dict = None
     ):
-        """
-        Return an objective function for hyperparameter tuning via optuna.
-        This implementation reuses the adapter instance and only instantiates a new underlying
-        LogAnomaly model when set_params is called.
-        """
+        """Objective function for tuning evaluation-specific hyperparameters."""
         assert self.num_classes is not None, "Call split preprocessing first"
 
         self.set_params(**(prev_params or {}))
-        self.train(self._model, x_train)
+        train_set, _ = self.get_sliding_window_dataset(
+            x_train, self.vocab.PAD, normal_only=True
+        )
+        self.train(self._model, train_set)
 
         def objective(trial):
             self.num_candidates = trial.suggest_int(
@@ -767,37 +756,34 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         self._model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
         self.log.info("LogAnomaly instantiated: %s", self._model.model)
 
-    def fit(self, x_train, y_train):
+    def fit(self, x_train: np.ndarray[Instance], y_train: np.ndarray[int]):
         """
         Fit the model using the provided training instances.
         """
-        self.train(self._model, x_train)
+        train_set, _ = self.get_sliding_window_dataset(
+            x_train, self.vocab.PAD, normal_only=True
+        )
+        self.train(self._model, train_set)
 
     def train(
         self,
         model: LogAnomaly,
-        x_train: np.ndarray[Instance],
+        train_set: TensorDataset,
         model_save_path: str = None,
         callbacks: Optional[List[Callable[[LogAnomaly, int], None]]] = None,
     ):
         """
         Train the LogAnomaly model.
-        For each batch:
-          - Extract sequential data from instances.
-          - Use the feature extractor to obtain quantity features.
-          - Attach the computed quantities to each instance.
-          - Generate training inputs/targets.
-          - Compute loss, backpropagate, apply gradient clipping, and update the model.
         """
         self.log.info(
-            "Starting training for %d epochs with batch size %d",
+            "Starting training for %d epochs with batch size %d, num_epochs: %d",
             self.epochs,
             self.batch_size,
+            self.epochs,
         )
+        self.log.info("Model: %s", model)
+        self.log.info("Number of candidates: %s", self.num_candidates)
 
-        train_set, _ = self._get_sliding_window_dataset(
-            x_train, self.vocab.PAD, normal_only=True
-        )
         train_loader = TorchDataLoader(
             train_set, batch_size=self.batch_size, shuffle=True
         )
@@ -886,7 +872,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
 
         model.model.eval()
         with torch.no_grad():
-            dataset, window_counts = self._get_sliding_window_dataset(
+            dataset, window_counts = self.get_sliding_window_dataset(
                 x_test, pad_token=self.vocab.PAD, dtype=torch.long
             )
 
