@@ -1120,7 +1120,7 @@ class LogRobustAdapter(LogADCompAdapter):
             """Return the validation loss for a given set of hyperparameters."""
             hidden_size = trial.suggest_categorical("hidden_size", [128])
             num_layers = trial.suggest_categorical("num_layers", [2])
-            self.epochs = trial.suggest_categorical("epochs", [20])
+            self.epochs = trial.suggest_categorical("epochs", [40])
             self.batch_size = trial.suggest_categorical(
                 "batch_size", [32, 64, 128, 256, 512, 1024]
             )
