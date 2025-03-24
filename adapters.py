@@ -1160,8 +1160,9 @@ class LogRobustAdapter(LogADCompAdapter):
             self.train(
                 model, x_train, y_train, callbacks=[show_memory_usage, val_callback]
             )
-            y_pred = self.predict(x_val)
+            y_pred = self._predict(model, x_val)
             metrics = calculate_metrics(y_val, y_pred)
+            self.log.info("Final validation F1: %.4f", metrics["f1"])
             return metrics["f1"]
 
         return objective
