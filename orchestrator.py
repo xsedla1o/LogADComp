@@ -1,5 +1,4 @@
 import argparse
-import csv
 import gc
 import json
 import os
@@ -7,6 +6,8 @@ import os
 import optuna
 import pandas as pd
 import tomli
+from optuna.pruners import PatientPruner, HyperbandPruner
+from optuna.samplers import TPESampler
 
 from adapters import model_adapters, DualTrialAdapter
 from dataloader import dataloaders
@@ -117,7 +118,12 @@ if __name__ == "__main__":
             x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
 
         # Check if adapter requires training hyperparameters
-        study = optuna.create_study(direction="minimize")
+        study = optuna.create_study(
+            study_name="training_hyperparameters",
+            direction="minimize",
+            sampler=TPESampler(),
+            pruner=PatientPruner(HyperbandPruner(), patience=1),
+        )
         with Timed("Optimize training hyperparameters"):
             study.optimize(
                 model.get_training_trial_objective(x_train, y_train, x_val, y_val),
@@ -161,7 +167,12 @@ if __name__ == "__main__":
             x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
 
         # Hyperparameter tuning
-        study = optuna.create_study(direction="maximize")
+        study = optuna.create_study(
+            study_name="hyperparameters",
+            direction="maximize",
+            sampler=TPESampler(),
+            pruner=PatientPruner(HyperbandPruner(), patience=1),
+        )
         with Timed("Optimize hyperparameters"):
             study.optimize(
                 model.get_trial_objective(
