@@ -43,7 +43,7 @@ def skip_when_present(key: Union[str, List[str]], load: Callable = None):
             if all(exists_and_not_empty(self.config[k]) for k in key):
                 print(
                     f"Skipping as already processed: "
-                    + ", ".join(self.config[k] for k in key)
+                    + ", ".join(str(self.config[k]) for k in key)
                 )
                 return load(self) if load is not None else None
             return func(self, *args, **kwargs)

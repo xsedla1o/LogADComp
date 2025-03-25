@@ -1,6 +1,12 @@
+import os
+import shutil
+import sys
 import time
 from abc import abstractmethod, ABC
-from typing import Union, Type, Dict, Tuple, List, Optional, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict, Type
+from typing import Union, Callable
 
 import numpy as np
 import optuna
@@ -10,12 +16,13 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset, Dataset
 
-from dataloader import NdArr, DataLoader
+from dataloader import NdArr, DataLoader, skip_when_present
 from loglizer.loglizer.models import SVM, LogClustering
 from preprocess import Normalizer
 from sempca.const import device
 from sempca.entities import Instance
-from sempca.models import PCAPlusPlus, PCA, DeepLog, LogAnomaly, LogRobust
+from sempca.models import LogAnomaly, LogRobust, DeepLog
+from sempca.models import PCAPlusPlus, PCA
 from sempca.module import Optimizer, Vocab
 from sempca.utils import (
     get_logger,
@@ -23,12 +30,43 @@ from sempca.utils import (
     update_instances,
 )
 from sempca.utils import tqdm
-from utils import calculate_metrics, get_memory_usage, log_gpu_memory_usage
+from utils import calculate_metrics, get_memory_usage
+from utils import log_gpu_memory_usage
+
+sys.path.append(str(Path(__file__).parent / "logbert"))
+
+from bert_pytorch.dataset import WordVocab
+from bert_pytorch import Predictor, Trainer
+
+
+@dataclass
+class CachePaths:
+    """
+    DataPaths is a dataclass that contains all the paths to the files and directories
+    """
+
+    split: Union[Path, str]
+
+    @staticmethod
+    def to_path(path: Union[str, Path, None]) -> Union[Path, None]:
+        if path is not None:
+            return Path(path)
+        return None
+
+    def __post_init__(self):
+        self.split = self.to_path(self.split)
+        os.makedirs(self.split, exist_ok=True)
+
+    def clear_split_cache(self):
+        """Recursively deletes all contents of the split cache dir."""
+        for file in self.split.glob("*"):
+            shutil.rmtree(file)
 
 
 class LogADCompAdapter(ABC):
-    def __init__(self):
+    def __init__(self, paths: CachePaths):
         self._model = None
+        self.paths = paths
 
     @staticmethod
     @abstractmethod
@@ -68,8 +106,8 @@ class DualTrialAdapter(LogADCompAdapter):
 
 
 class PCAAdapter(LogADCompAdapter):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, paths: CachePaths):
+        super().__init__(paths)
         self._model = PCA()
         self.threshold_mult = 1.0
 
@@ -122,8 +160,8 @@ class PCAAdapter(LogADCompAdapter):
 
 
 class SemPCAAdapter(PCAAdapter):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, paths: CachePaths):
+        super().__init__(paths)
         self._model = PCAPlusPlus()
         self.threshold_mult = 1.0
 
@@ -170,8 +208,8 @@ class SemPCAAdapter(PCAAdapter):
 
 
 class SVMAdapter(LogADCompAdapter):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, paths: CachePaths):
+        super().__init__(paths)
         self._model = SVM()
 
     @staticmethod
@@ -224,8 +262,8 @@ class SVMAdapter(LogADCompAdapter):
 
 
 class LogClusterAdapter(LogADCompAdapter):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, paths: CachePaths):
+        super().__init__(paths)
         self._model = LogClustering()
 
     @staticmethod
@@ -268,8 +306,8 @@ class LogClusterAdapter(LogADCompAdapter):
 
 
 class SemPCALSTMAdapter(DualTrialAdapter, ABC):
-    def __init__(self, window=10):
-        super().__init__()
+    def __init__(self, paths: CachePaths, window=10):
+        super().__init__(paths)
         self.log = get_logger("SemPCALSTMAdapter")
         self.window = window
 
@@ -377,8 +415,8 @@ class SemPCALSTMAdapter(DualTrialAdapter, ABC):
 
 
 class DeepLogAdapter(SemPCALSTMAdapter):
-    def __init__(self, window=10, in_size=1):
-        super().__init__(window)
+    def __init__(self, paths: CachePaths, window=10, in_size=1):
+        super().__init__(paths, window)
         self.log = get_logger("DeepLogAdapter")
         self._model: Optional[DeepLog] = None
         self.pad = 0
@@ -620,8 +658,8 @@ class DeepLogAdapter(SemPCALSTMAdapter):
 
 
 class LogAnomalyAdapter(SemPCALSTMAdapter):
-    def __init__(self, window=10):
-        super().__init__(window)
+    def __init__(self, paths: CachePaths, window=10):
+        super().__init__(paths, window)
         self.log = get_logger("LogAnomalyAdapter")
         self._model: Optional[LogAnomaly] = None
         self.vocab: Optional[Vocab] = None
@@ -925,8 +963,8 @@ class InstanceDataset(Dataset):
 
 
 class LogRobustAdapter(LogADCompAdapter):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, paths: CachePaths):
+        super().__init__(paths)
         self.log = get_logger("LogRobustAdapter")
         self._model: Optional[LogRobust] = None
         self.vocab: Optional[Vocab] = None
@@ -1168,6 +1206,166 @@ class LogRobustAdapter(LogADCompAdapter):
         return objective
 
 
+CACHED_DATASET_KEYS = [
+    "train_path",
+    "valid_path",
+    "test_normal_path",
+    "test_anomaly_path",
+]
+CACHED_PATH_KEYS = CACHED_DATASET_KEYS + ["vocab_path"]
+
+
+class LogBERTAdapter(LogADCompAdapter):
+    def __init__(self, paths: CachePaths, dataset="HDFS"):
+        super().__init__(paths)
+        self.log = get_logger("LogBERTAdapter")
+        self.dataset = dataset
+        self._configure_options()
+        self._model: Optional[Predictor] = None
+
+    def _configure_options(self):
+        """Configure the options dictionary based on the dataset."""
+        self.o = {}  # Options
+        self.o["device"] = device
+        self.o["output_dir"] = self.paths.split
+
+        model_dir = self.o["output_dir"] / "bert"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        self.o["model_dir"] = model_dir
+
+        self.o["model_path"] = self.o["model_dir"] / "best_bert.pth"
+        self.o["train_vocab"] = self.o["output_dir"] / "train"
+
+        self.o["vocab_path"] = self.o["output_dir"] / "vocab.pkl"  # pickle file
+
+        self.o["scale_path"] = self.o["model_dir"] / "scale.pkl"
+
+        self.o["train_path"] = self.o["output_dir"] / "train"
+        self.o["valid_path"] = self.o["output_dir"] / "valid"
+        self.o["test_normal_path"] = self.o["output_dir"] / "test_normal"
+        self.o["test_anomaly_path"] = self.o["output_dir"] / "test_anomaly"
+
+        # Ensure directories exist
+        # Convert paths to strings to keep LogBERT happy
+        for k, path in self.o.items():
+            if isinstance(path, Path):
+                if path.is_dir():
+                    self.o[k] = str(path) + "/"
+                else:
+                    self.o[k] = str(path)
+
+        # For the skip_when_present decorator
+        self.config = {k: self.o[k] for k in CACHED_PATH_KEYS}
+
+    @staticmethod
+    def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
+        """Adapts the data from the loader."""
+        return loader.get_instances()
+
+    def preprocess_split(self, x_train: NdArr, x_val: NdArr, x_test: NdArr):
+        """Preprocesses and writes the instances in the LogBERT format."""
+        self.log.info("Preprocessing the instances")
+        self._write_logbert(x_train, x_val, x_test)
+        self._prepare_vocab()
+        return x_train, x_val, x_test
+
+    @skip_when_present(CACHED_DATASET_KEYS)
+    def _write_logbert(self, x_train, x_val, x_test):
+        """Write the train, validation, and test data to files in LogBERT format."""
+        train = [inst for inst in x_train if inst.label == "Normal"]
+        self._write_to_file(train, self.o["train_path"])
+        valid = [inst for inst in x_val if inst.label == "Normal"]
+        self._write_to_file(valid, self.o["valid_path"])
+
+        test_normal = [inst for inst in x_test if inst.label == "Normal"]
+        self._write_to_file(test_normal, self.o["test_normal_path"])
+        test_anomaly = [inst for inst in x_test if inst.label == "Anomalous"]
+        self._write_to_file(test_anomaly, self.o["test_anomaly_path"])
+
+    @skip_when_present("vocab_path")
+    def _prepare_vocab(self):
+        with open(self.o["train_path"], "r") as f:
+            lines = f.readlines()
+        with open(self.o["valid_path"], "r") as f:
+            lines += f.readlines()
+        vocab = WordVocab(lines)
+        self.log.debug("Vocab size: %d", len(vocab))
+        self.log.debug("Saving to: %s", self.o["vocab_path"])
+        vocab.save_vocab(self.o["vocab_path"])
+
+    @staticmethod
+    def _write_to_file(instances, out_f):
+        """Write a list of instances to a file in LogBERT format."""
+        with open(out_f, "w") as out_f:
+            for inst in instances:
+                out_f.write(" ".join(map(str, inst.sequence)))
+                out_f.write("\n")
+
+    def set_params(self, **kwargs):
+        """No hyperparameters to set directly for LogBERT, as they are managed internally."""
+        self.o["window_size"] = 128
+        self.o["adaptive_window"] = True
+        self.o["seq_len"] = 512
+        self.o["max_len"] = 512  # for position embedding
+        self.o["min_len"] = 10
+        self.o["mask_ratio"] = 0.65
+        # sample ratio
+        self.o["train_ratio"] = 1
+        self.o["valid_ratio"] = 0.1
+        self.o["test_ratio"] = 1
+
+        # features
+        self.o["is_logkey"] = True
+        self.o["is_time"] = False
+
+        self.o["hypersphere_loss"] = True
+        self.o["hypersphere_loss_test"] = False
+
+        self.o["scale"] = None  # MinMaxScaler()
+
+        # model
+        self.o["hidden"] = 256  # embedding size
+        self.o["layers"] = 4
+        self.o["attn_heads"] = 4
+
+        self.o["epochs"] = 200
+        self.o["n_epochs_stop"] = 10
+        self.o["batch_size"] = 32
+
+        self.o["corpus_lines"] = None
+        self.o["on_memory"] = True
+        self.o["num_workers"] = 5
+        self.o["lr"] = 1e-3
+        self.o["adam_beta1"] = 0.9
+        self.o["adam_beta2"] = 0.999
+        self.o["adam_weight_decay"] = 0.00
+        self.o["with_cuda"] = True
+        self.o["cuda_devices"] = None
+        self.o["log_freq"] = None
+
+        # predict
+        self.o["num_candidates"] = 6
+        self.o["gaussian_mean"] = 0
+        self.o["gaussian_std"] = 1
+
+    def fit(self, x_train, y_train=None):
+        """Trains the LogBERT model or loads an existing one if available."""
+        Trainer(self.o).train()
+
+    def predict(self, x_test):
+        """Makes predictions using LogBERT."""
+        Predictor(self.o).predict()
+
+    @staticmethod
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
+        """No hyperparameters to tune for LogBERT."""
+
+        def objective(trial: optuna.Trial):
+            return 0.0
+
+        return objective
+
+
 model_adapters: Dict[str, Type[LogADCompAdapter]] = {
     "PCA": PCAAdapter,
     "SemPCA": SemPCAAdapter,
@@ -1176,4 +1374,5 @@ model_adapters: Dict[str, Type[LogADCompAdapter]] = {
     "DeepLog": DeepLogAdapter,
     "LogAnomaly": LogAnomalyAdapter,
     "LogRobust": LogRobustAdapter,
+    "LogBERT": LogBERTAdapter,
 }

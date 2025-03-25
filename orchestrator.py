@@ -2,6 +2,7 @@ import argparse
 import gc
 import json
 import os
+from pathlib import Path
 
 import optuna
 import pandas as pd
@@ -9,7 +10,7 @@ import tomli
 from optuna.pruners import PatientPruner, HyperbandPruner
 from optuna.samplers import TPESampler
 
-from adapters import model_adapters, DualTrialAdapter
+from adapters import model_adapters, DualTrialAdapter, CachePaths
 from dataloader import dataloaders
 from sempca.preprocessing import DataPaths
 from utils import Timed, calculate_metrics, get_memory_usage
@@ -69,7 +70,8 @@ if __name__ == "__main__":
     train_ratio = args.train_ratio
     val_ratio = args.val_ratio
     dataset_dir = dir_config["datasets"]
-    output_dir = f"{dir_config['outputs']}/{d_name}_{train_ratio}/{model_name}"
+    d_id = f"{d_name}_{train_ratio}"
+    output_dir = f"{dir_config['outputs']}/{d_id}/{model_name}"
 
     config_dict = {
         "dataset_dir": dataset_dir,
@@ -94,13 +96,19 @@ if __name__ == "__main__":
         datasets_dir=config_dict["dataset_dir"],
         label_file=config_dict["processed_labels"],
     )
+    m_paths = CachePaths(
+        split=(
+            Path(dir_config["outputs"]) / ".." / "cache" / d_id / model_name
+        ).resolve()
+    )
     print(paths)
+    print(m_paths)
     print(f"Base usage {get_memory_usage()}")
 
     dataloader = dataloaders[d_name](config_dict, paths)
     dataloader.get()
 
-    model = model_adapters[model_name]()
+    model = model_adapters[model_name](m_paths)
     xs, ys = model.transform_representation(dataloader)
     print(f"Transformed usage {get_memory_usage()}")
 
@@ -191,10 +199,9 @@ if __name__ == "__main__":
 
         best_params = study.best_params
 
-        print(f"Pre GC usage {get_memory_usage()}")
         del x_train, y_train, x_val, y_val, x_test, y_test
         gc.collect()
-        print(f"Post GC usage {get_memory_usage()}")
+        print(f"Memory usage {get_memory_usage()}")
 
     print("Best params", best_params)
     print(f"Post params usage {get_memory_usage()}")
@@ -246,10 +253,9 @@ if __name__ == "__main__":
         )
         print(metrics_df)
 
-        print(f"Pre GC usage {get_memory_usage()}")
         del x_train, y_train, x_val, y_val, x_test, y_test, metrics
         gc.collect()
-        print(f"Post GC usage {get_memory_usage()}")
+        print(f"Memory usage {get_memory_usage()}")
 
     dfs = []
     for i in range(10):
