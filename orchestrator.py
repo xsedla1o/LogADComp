@@ -256,6 +256,7 @@ if __name__ == "__main__":
         del x_train, y_train, x_val, y_val, x_test, y_test, metrics
         gc.collect()
         print(f"Memory usage {get_memory_usage()}")
+        m_paths.clear_split_cache()
 
     dfs = []
     for i in range(10):

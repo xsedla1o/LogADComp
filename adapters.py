@@ -1334,7 +1334,7 @@ class LogBERTAdapter(LogADCompAdapter):
 
         self.o["corpus_lines"] = None
         self.o["on_memory"] = True
-        self.o["num_workers"] = 5
+        self.o["num_workers"] = min(5, int(os.getenv("PBS_NCPUS", os.cpu_count())))
         self.o["lr"] = 1e-3
         self.o["adam_beta1"] = 0.9
         self.o["adam_beta2"] = 0.999
