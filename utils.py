@@ -51,8 +51,13 @@ class Timed(ContextManager):
             seconds = self.end - self.start
             if seconds < 60:
                 print(f"{self.label}: {seconds:.2f}s ")
-            else:
+            elif seconds < 3600:
                 print(f"{self.label}: {int(seconds / 60)}m {seconds % 60:.2f}s ")
+            else:
+                h = seconds // 3600
+                m = (seconds % 3600) // 60
+                s = seconds % 60
+                print(f"{self.label}: {h}h {m}m {s:.2f}s")
         else:
             self.output_dict[self.label] = self.end - self.start
 
