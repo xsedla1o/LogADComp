@@ -105,8 +105,8 @@ class LogADCompAdapter(ABC):
         """Set the current wrapped model's hyperparameters"""
 
     @abstractmethod
-    def fit(self, x_train, y_train):
-        """Fit the model on the training data"""
+    def fit(self, x_train, y_train, x_val, y_val):
+        """Fit the model on the training data, allowing for validation"""
 
     def predict(self, x_test):
         """Predict on the test data"""
@@ -169,7 +169,7 @@ class PCAAdapter(LogADCompAdapter):
         )
         self.threshold_mult = threshold_mult
 
-    def fit(self, x_train, _y_train=None):
+    def fit(self, x_train, *args, **kwargs):
         self._model.fit(x_train)
         self._model.threshold *= self.threshold_mult
 
@@ -272,7 +272,7 @@ class SVMAdapter(LogADCompAdapter):
             max_iter=max_iter,
         )
 
-    def fit(self, x_train, y_train):
+    def fit(self, x_train, y_train, *args, **kwargs):
         self._model.fit(x_train, y_train)
 
 
@@ -316,7 +316,7 @@ class LogClusterAdapter(LogADCompAdapter):
             num_bootstrap_samples=num_bootstrap_samples,
         )
 
-    def fit(self, x_train, y_train):
+    def fit(self, x_train, y_train, *args, **kwargs):
         self._model.fit(x_train[y_train == 0, :])
 
 
@@ -555,7 +555,7 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         self.batch_size = batch_size
         self.lr = lr
 
-    def fit(self, x_train, y_train):
+    def fit(self, x_train, *args, **kwargs):
         train_set, _ = self.get_sliding_window_dataset(
             x_train, self.pad, normal_only=True, dtype=torch.float32
         )
@@ -809,7 +809,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         self._model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
         self.log.info("LogAnomaly instantiated: %s", self._model.model)
 
-    def fit(self, x_train: np.ndarray[Instance], y_train: np.ndarray[int]):
+    def fit(self, x_train: np.ndarray, *args, **kwargs):
         """
         Fit the model using the provided training instances.
         """
@@ -1130,7 +1130,7 @@ class LogRobustAdapter(LogADCompAdapter):
                 torch.save(model.model.state_dict(), model_save_path)
         self.log.info("Training complete.")
 
-    def fit(self, x_train, y_train):
+    def fit(self, x_train, y_train, *args, **kwargs):
         """
         Fit the model using the provided training instances.
         """
@@ -1363,7 +1363,7 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["gaussian_mean"] = 0
         self.o["gaussian_std"] = 1
 
-    def fit(self, x_train, y_train=None):
+    def fit(self, x_train, y_train, x_val, y_val):
         """Trains the LogBERT model or loads an existing one if available."""
         Trainer(self.o).train()
 

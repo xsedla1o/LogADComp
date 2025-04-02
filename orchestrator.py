@@ -226,7 +226,7 @@ if __name__ == "__main__":
         model.set_params(**best_train_params, **best_params)
 
         with Timed("Fit model"):
-            model.fit(x_train, y_train)
+            model.fit(x_train, y_train, x_val, y_val)
 
         metrics = []
 
