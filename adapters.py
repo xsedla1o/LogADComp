@@ -3,6 +3,7 @@ import shutil
 import sys
 import time
 from abc import abstractmethod, ABC
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Type
@@ -30,12 +31,15 @@ from sempca.utils import (
     update_instances,
 )
 from sempca.utils import tqdm
-from utils import calculate_metrics, get_memory_usage
+from utils import calculate_metrics, get_memory_usage, Timed
 from utils import log_gpu_memory_usage
 
 sys.path.append(str(Path(__file__).parent / "logbert"))
 
-from bert_pytorch.dataset import WordVocab
+from bert_pytorch.dataset import LogDataset, WordVocab
+from bert_pytorch.predict_log import compute_anomaly_bool, find_best_threshold
+from bert_pytorch.dataset.sample import fixed_window_data
+from bert_pytorch.model import BERTLog
 from bert_pytorch import Predictor, Trainer
 
 
@@ -1245,7 +1249,7 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["output_dir"] = self.paths.split
 
         model_dir = self.o["output_dir"] / "bert"
-        model_dir.mkdir(parents=True, exist_ok=True)
+        self.paths.register_subdir(model_dir)
         self.o["model_dir"] = model_dir
 
         self.o["model_path"] = self.o["model_dir"] / "best_bert.pth"
@@ -1322,7 +1326,7 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["adaptive_window"] = True
         self.o["seq_len"] = 512
         self.o["max_len"] = 512  # for position embedding
-        self.o["min_len"] = 10
+        self.o["min_len"] = 0
         self.o["mask_ratio"] = 0.65
         # sample ratio
         self.o["train_ratio"] = 1
@@ -1344,6 +1348,7 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["attn_heads"] = 4
 
         self.o["epochs"] = 200
+        self.o["warm_up_epochs"] = 10
         self.o["n_epochs_stop"] = 10
         self.o["batch_size"] = 32
 
@@ -1363,13 +1368,262 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["gaussian_mean"] = 0
         self.o["gaussian_std"] = 1
 
+        self.threshold = 0.5  # Dummy value overwritten by fit()
+
     def fit(self, x_train, y_train, x_val, y_val):
         """Trains the LogBERT model or loads an existing one if available."""
-        Trainer(self.o).train()
+        t = Trainer(self.o)
+
+        x_train_norm = x_train[y_train == 0]
+        x_val_norm = x_val[y_val == 0]
+
+        train_seq_x, train_tim_x, _ = self.fixed_windows_from_instances(
+            x_train_norm, t.window_size, t.adaptive_window, t.seq_len, t.min_len
+        )
+        val_seq_x, val_tim_x, _ = self.fixed_windows_from_instances(
+            x_val_norm, t.window_size, t.adaptive_window, t.seq_len, t.min_len
+        )
+
+        Trainer(self.o).train_on(train_seq_x, train_tim_x, val_seq_x, val_tim_x)
+
+        # Load best model after training to find best threshold
+        p, model = self._load_predictor_model()
+        vocab = WordVocab.load_vocab(p.vocab_path)
+
+        x_train_anomaly = x_train[y_train == 1]
+        x_val_anomaly = x_val[y_val == 1]
+
+        x_norm = np.concatenate((x_train_norm, x_val_norm), axis=0)
+        x_anomaly = np.concatenate((x_train_anomaly, x_val_anomaly), axis=0)
+
+        normal_results, _, _ = self._predict_helper(p, model, x_norm, vocab, scale=None)
+        anomaly_results, _, _ = self._predict_helper(
+            p, model, x_anomaly, vocab, scale=None
+        )
+
+        # Compute the threshold based on the training data
+        best_th, best_seq_th, FP, TP, TN, FN, P, R, F1 = find_best_threshold(
+            normal_results,
+            anomaly_results,
+            params=p.get_params(),
+            th_range=None,  # Unused
+            seq_range=np.arange(0, 1, 0.1),
+        )
+        self.log.info("Best threshold: %s yielding F1: %s", best_th, F1)
+        self.threshold = best_seq_th
+
+    def _load_predictor_model(self) -> Tuple[Predictor, BERTLog]:
+        """Load the LogBERT model."""
+        p = Predictor(self.o)
+        model: BERTLog = torch.load(p.model_path, weights_only=False)
+        model.to(p.device)
+        model.eval()
+
+        if p.hypersphere_loss:
+            center_dict = torch.load(p.model_dir + "best_center.pt", weights_only=False)
+            p.center = center_dict["center"]
+            p.radius = center_dict["radius"]
+            # p.center = p.center.view(1,-1)
+        return p, model
 
     def predict(self, x_test):
         """Makes predictions using LogBERT."""
-        Predictor(self.o).predict()
+        with torch.no_grad():
+            p, model = self._load_predictor_model()
+
+            vocab = WordVocab.load_vocab(p.vocab_path)
+
+            scale = None
+            with Timed("Running model to get anomaly scores"):
+                test_normal_results, test_normal_errors, seq_split_cnts = (
+                    self._predict_helper(p, model, x_test, vocab, scale)
+                )
+
+            with Timed("Detecting anomalies based on threshold"):
+                sample_y_pred = compute_anomaly_bool(
+                    test_normal_results, p.get_params(), self.threshold
+                )
+
+            y_pred = []
+            start_idx = 0
+            for count in seq_split_cnts:
+                sample_pred = sample_y_pred[start_idx : start_idx + count]
+                seq_pred = 1 if sample_pred.any() else 0
+                y_pred.append(seq_pred)
+                start_idx += count
+            return np.array(y_pred, dtype=int)
+
+    @staticmethod
+    def fixed_windows_from_instances(
+        instances, window_size, adaptive_window, seq_len, min_len
+    ):
+        """
+        Generate log_seqs and tim_seqs directly from a list of instances without
+        converting the sequences to a string.
+
+        Each instance is expected to have a 'sequence' attribute that is a list of tokens.
+        Tokens should be either a single value (log key) or a two-element structure [log_key, timestamp].
+
+        :param instances: List of instances.
+        :param window_size: Window size for segmentation.
+        :param adaptive_window: Boolean flag for adaptive windowing.
+        :param seq_len: Maximum number of tokens per session.
+        :param scale: Optional scaler for time sequences (if needed).
+        :param min_len: Minimum sequence length required.
+        :return: Tuple (log_seqs, tim_seqs) sorted by descending sequence length.
+        """
+        log_seqs = []
+        tim_seqs = []
+        seq_split_cnts = []
+        skipped = 0
+
+        for inst in tqdm(instances, desc="Generating fixed windows"):
+            log_seq, tim_seq, split_cnt = fixed_window_data(
+                inst.sequence,
+                window_size,
+                adaptive_window=adaptive_window,
+                seq_len=seq_len,
+                min_len=min_len,
+            )
+            if split_cnt == 0:
+                skipped += 1
+                continue
+
+            log_seqs += log_seq
+            tim_seqs += tim_seq
+            seq_split_cnts.append(split_cnt)
+
+        # Convert to numpy arrays (using dtype=object to accommodate variable lengths).
+        log_seqs = np.array(log_seqs, dtype=object)
+        tim_seqs = np.array(tim_seqs, dtype=object)
+
+        # Sort sequences by their length in descending order.
+        lengths = np.array(list(map(len, log_seqs)))
+        sorted_indices = np.argsort(-lengths)
+        log_seqs = log_seqs[sorted_indices]
+        tim_seqs = tim_seqs[sorted_indices]
+
+        print(f"Processed {len(log_seqs)} sequences")
+        print(f"Skipped {skipped} sequences")
+        assert len(log_seqs) == len(tim_seqs)
+        assert len(log_seqs) == len(seq_split_cnts)
+        return log_seqs, tim_seqs, seq_split_cnts
+
+    def _predict_helper(
+        self, p: Predictor, model: BERTLog, instances, vocab, scale=None
+    ):
+        total_results = []
+        output_cls = []
+        logkey_test, time_test, seq_split_cnts = self.fixed_windows_from_instances(
+            instances, p.window_size, p.adaptive_window, p.seq_len, p.min_len
+        )
+
+        seq_dataset = LogDataset(
+            logkey_test,
+            time_test,
+            vocab,
+            seq_len=p.seq_len,
+            corpus_lines=p.corpus_lines,
+            on_memory=p.on_memory,
+            predict_mode=True,
+            mask_ratio=p.mask_ratio,
+        )
+
+        # use large batch size in test data
+        data_loader = TorchDataLoader(
+            seq_dataset,
+            batch_size=p.batch_size,
+            num_workers=p.num_workers,
+            collate_fn=seq_dataset.collate_fn,
+        )
+        telem = defaultdict(float)
+
+        for idx, data in enumerate(tqdm(data_loader, desc="Predicting")):
+            data = {key: value.to(p.device) for key, value in data.items()}
+            ts = time.time()
+            result = model(data["bert_input"], data["time_input"])
+            telem["forward"] += time.time() - ts
+
+            # mask_lm_output, mask_tm_output: batch_size x session_size x vocab_size
+            # cls_output: batch_size x hidden_size
+            # bert_label, time_label: batch_size x session_size
+            # in session, some logkeys are masked
+
+            mask_lm_output, mask_tm_output = (
+                result["logkey_output"],
+                result["time_output"],
+            )
+            output_cls += result["cls_output"].tolist()
+
+            tsv = time.time()
+            undetected_tokens = []
+            svdd_labels = []
+            total_logkeys = torch.sum(data["bert_input"] > 0, dim=1).tolist()
+
+            masks = data["bert_label"] > 0
+            masked_tokens = torch.sum(masks, dim=1).tolist()
+
+            if p.is_logkey:
+                # shape (num_masked, 2) where each row is [batch_index, token_index]
+                m_idxs = torch.nonzero(masks, as_tuple=False)
+                # extracts all masked token outputs, flattening to (num_masked, V)
+                flat_masked_output = mask_lm_output[m_idxs[:, 0], m_idxs[:, 1]]
+                flat_masked_labels = data["bert_label"][m_idxs[:, 0], m_idxs[:, 1]]
+
+                B = mask_lm_output.shape[0]
+                batch_masked_outputs = []
+                batch_masked_labels = []
+                for b in range(B):
+                    # Get all rows corresponding to batch element b
+                    idxs = m_idxs[:, 0] == b
+                    batch_masked_outputs.append(flat_masked_output[idxs])
+                    batch_masked_labels.append(flat_masked_labels[idxs])
+
+                # Pad for batch processing, shape (B, max(num_masked in batch), V)
+                padded_masked_output = pad_sequence(
+                    batch_masked_outputs, batch_first=True, padding_value=-1
+                )
+                padded_masked_labels = pad_sequence(
+                    batch_masked_labels, batch_first=True, padding_value=-1
+                )
+                # To discard padding values
+                valid_mask = padded_masked_labels != -1
+
+                undetected_tokens, _ = p.detect_logkey_anomaly_vectorized(
+                    padded_masked_output, padded_masked_labels, valid_mask
+                )
+
+            if p.hypersphere_loss_test:
+                # detect by deepSVDD distance
+                assert result["cls_output"][0].size() == p.center.size()
+                dist = torch.sqrt(
+                    torch.sum((result["cls_output"] - p.center) ** 2, dim=1)
+                )
+                svdd_labels = (dist > p.radius).long().tolist()
+
+            total_results.extend(
+                (
+                    {
+                        "num_error": 0,
+                        "undetected_tokens": undetected_tokens[j].item()
+                        if p.is_logkey
+                        else 0,
+                        "masked_tokens": masked_tokens[j],
+                        "total_logkey": total_logkeys[j],
+                        "deepSVDD_label": svdd_labels[j]
+                        if p.hypersphere_loss_test
+                        else 0,
+                    }
+                    for j in range(len(data["bert_label"]))
+                )
+            )
+            telem["vectorized detection"] += time.time() - tsv
+
+        for i, (k, v) in enumerate(telem.items()):
+            print(f"{i + 1} - {k:>20s}: {v:6.3f} sec")
+
+        # for hypersphere distance
+        return total_results, output_cls, seq_split_cnts
 
     @staticmethod
     def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
