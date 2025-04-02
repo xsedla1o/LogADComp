@@ -370,7 +370,7 @@ class SemPCALSTMAdapter(DualTrialAdapter, ABC):
 
     def get_sliding_window_dataset(
         self,
-        instances: np.ndarray[Instance],
+        instances: np.ndarray,
         pad_token: int,
         normal_only: bool = False,
         step: int = 1,
@@ -635,7 +635,7 @@ class DeepLogAdapter(SemPCALSTMAdapter):
     def predict(self, x_test):
         return self._predict(self._model, x_test)
 
-    def _predict(self, model: DeepLog, x_test: np.ndarray[Instance]):
+    def _predict(self, model: DeepLog, x_test: np.ndarray):
         model.to(device)
         with torch.no_grad():
             dataset, window_counts = self.get_sliding_window_dataset(
@@ -920,7 +920,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
     def predict(self, x_test):
         return self._predict(self._model, x_test)
 
-    def _predict(self, model: LogAnomaly, x_test: np.ndarray[Instance]):
+    def _predict(self, model: LogAnomaly, x_test: np.ndarray):
         vocab_size = self.vocab.vocab_size
 
         model.model.eval()
@@ -963,7 +963,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
 
 
 class InstanceDataset(Dataset):
-    def __init__(self, instances: np.ndarray[Instance], labels: np.ndarray[int] = None):
+    def __init__(self, instances: np.ndarray, labels: np.ndarray = None):
         self.instances = instances
         if labels is not None:
             self.labels = labels
@@ -1058,8 +1058,8 @@ class LogRobustAdapter(LogADCompAdapter):
     def train(
         self,
         model: LogRobust,
-        x_train: np.ndarray[Instance],
-        y_train: np.ndarray[int],
+        x_train: np.ndarray,
+        y_train: np.ndarray,
         callbacks: Optional[List[Callable[[LogRobust, int], None]]] = None,
         model_save_path: str = None,
     ):
@@ -1139,7 +1139,7 @@ class LogRobustAdapter(LogADCompAdapter):
     def predict(self, x_test):
         return self._predict(self._model, x_test)
 
-    def _predict(self, model: LogRobust, x_test: np.ndarray[Instance]):
+    def _predict(self, model: LogRobust, x_test: np.ndarray):
         model.model.eval()
 
         test_dataset = InstanceDataset(x_test)
