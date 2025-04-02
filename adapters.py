@@ -56,11 +56,26 @@ class CachePaths:
     def __post_init__(self):
         self.split = self.to_path(self.split)
         os.makedirs(self.split, exist_ok=True)
+        self._subdirs = []
+
+    def register_subdir(self, subdir: Union[str, Path]) -> None:
+        """Registers a permanent subdir under the split directory."""
+        subdir = self.to_path(subdir).resolve()
+        assert str(subdir).startswith(str(self.split)), "Subdir must be under split"
+        subdir.mkdir(parents=True, exist_ok=True)
+        self._subdirs.append(subdir)
 
     def clear_split_cache(self):
         """Recursively deletes all contents of the split cache dir."""
         for file in self.split.glob("*"):
-            shutil.rmtree(file)
+            print("Deleting file:", file)
+            if file.is_file():
+                file.unlink()
+            else:
+                shutil.rmtree(file)
+        # Recreate the split directory
+        for subdir in self._subdirs:
+            subdir.mkdir(parents=True, exist_ok=True)
 
 
 class LogADCompAdapter(ABC):
