@@ -1519,7 +1519,7 @@ class LogBERTAdapter(LogADCompAdapter):
             collate_fn=seq_dataset.collate_fn,
         )
         telem = defaultdict(float)
-
+        t_begin = time.time()
         for idx, data in enumerate(tqdm(data_loader, desc="Predicting")):
             data = {key: value.to(p.device) for key, value in data.items()}
             ts = time.time()
@@ -1601,8 +1601,12 @@ class LogBERTAdapter(LogADCompAdapter):
             )
             telem["vectorized detection"] += time.time() - tsv
 
-        for i, (k, v) in enumerate(telem.items()):
-            print(f"{i + 1} - {k:>20s}: {v:6.3f} sec")
+        t_total = time.time() - t_begin
+        telem["unaccounted"] = t_total - sum(telem.values())
+        prof_line = ", ".join(
+            f"{i + 1}. {k}: {v:.3f}s" for i, (k, v) in enumerate(telem.items())
+        )
+        print("Profiled: " + prof_line)
 
         # for hypersphere distance
         return total_results, output_cls, seq_split_cnts
