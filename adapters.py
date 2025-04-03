@@ -1240,7 +1240,6 @@ class LogBERTAdapter(LogADCompAdapter):
         self.log = get_logger("LogBERTAdapter")
         self.dataset = dataset
         self._configure_options()
-        self._model: Optional[Predictor] = None
 
     def _configure_options(self):
         """Configure the options dictionary based on the dataset."""
@@ -1406,7 +1405,6 @@ class LogBERTAdapter(LogADCompAdapter):
             center_dict = torch.load(p.model_dir + "best_center.pt", weights_only=False)
             p.center = center_dict["center"]
             p.radius = center_dict["radius"]
-            # p.center = p.center.view(1,-1)
         return p, model
 
     def predict(self, x_test):
