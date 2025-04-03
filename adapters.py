@@ -1307,7 +1307,7 @@ class LogBERTAdapter(LogADCompAdapter):
             lines = f.readlines()
         with open(self.o["valid_path"], "r") as f:
             lines += f.readlines()
-        vocab = WordVocab(lines)
+        vocab = WordVocab(lines, convert=int)
         self.log.debug("Vocab size: %d", len(vocab))
         self.log.debug("Saving to: %s", self.o["vocab_path"])
         vocab.save_vocab(self.o["vocab_path"])
