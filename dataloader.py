@@ -117,6 +117,20 @@ class DataLoader(ABC):
 
         return xs, ys
 
+    def load_t_seq_representation(self):
+        loaded = np.load(self.config["t_seq_npz"], allow_pickle=True)
+        return loaded["xs"], loaded["ys"]
+
+    @skip_when_present("t_seq_npz", load=load_t_seq_representation)
+    def get_t_seq_representation(self) -> Tuple[NdArr, NdArr]:
+        """Load the T-Seq representation of the dataset for loglizer models"""
+        x_instances, ys = self.get_instances()
+
+        xs = np.vectorize(lambda x: x.sequence, otypes=[object])(x_instances)
+        np.savez_compressed(self.config["t_seq_npz"], xs=xs, ys=ys)
+
+        return xs, ys
+
     def load_word_vec_representation(self):
         loaded = np.load(self.config["word_vec_npz"])
         return loaded["xs"], loaded["ys"]

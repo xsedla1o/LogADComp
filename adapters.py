@@ -1279,45 +1279,28 @@ class LogBERTAdapter(LogADCompAdapter):
     @staticmethod
     def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
         """Adapts the data from the loader."""
-        return loader.get_instances()
+        return loader.get_t_seq_representation()
 
-    def preprocess_split(self, x_train: NdArr, x_val: NdArr, x_test: NdArr):
+    def preprocess_split(
+        self, x_train: NdArr, x_val: NdArr, x_test: NdArr
+    ) -> Tuple[NdArr, NdArr, NdArr]:
         """Preprocesses and writes the instances in the LogBERT format."""
         self.log.info("Preprocessing the instances")
-        self._write_logbert(x_train, x_val, x_test)
-        self._prepare_vocab()
+        self._prepare_vocab(x_train, x_val)
         return x_train, x_val, x_test
 
-    @skip_when_present(CACHED_DATASET_KEYS)
-    def _write_logbert(self, x_train, x_val, x_test):
-        """Write the train, validation, and test data to files in LogBERT format."""
-        train = [inst for inst in x_train if inst.label == "Normal"]
-        self._write_to_file(train, self.o["train_path"])
-        valid = [inst for inst in x_val if inst.label == "Normal"]
-        self._write_to_file(valid, self.o["valid_path"])
-
-        test_normal = [inst for inst in x_test if inst.label == "Normal"]
-        self._write_to_file(test_normal, self.o["test_normal_path"])
-        test_anomaly = [inst for inst in x_test if inst.label == "Anomalous"]
-        self._write_to_file(test_anomaly, self.o["test_anomaly_path"])
-
-    @skip_when_present("vocab_path")
-    def _prepare_vocab(self):
-        with open(self.o["train_path"], "r") as f:
-            lines = f.readlines()
-        with open(self.o["valid_path"], "r") as f:
-            lines += f.readlines()
-        vocab = WordVocab(lines, convert=int)
+    def _prepare_vocab(self, x_train, x_val):
+        vocab = WordVocab(np.concatenate([x_train, x_val], axis=0))
         self.log.debug("Vocab size: %d", len(vocab))
         self.log.debug("Saving to: %s", self.o["vocab_path"])
         vocab.save_vocab(self.o["vocab_path"])
 
     @staticmethod
-    def _write_to_file(instances, out_f):
+    def _write_to_file(seqs, out_f):
         """Write a list of instances to a file in LogBERT format."""
         with open(out_f, "w") as out_f:
-            for inst in instances:
-                out_f.write(" ".join(map(str, inst.sequence)))
+            for seq in seqs:
+                out_f.write(" ".join(map(str, seq)))
                 out_f.write("\n")
 
     def set_params(self, **kwargs):
@@ -1377,10 +1360,10 @@ class LogBERTAdapter(LogADCompAdapter):
         x_train_norm = x_train[y_train == 0]
         x_val_norm = x_val[y_val == 0]
 
-        train_seq_x, train_tim_x, _ = self.fixed_windows_from_instances(
+        train_seq_x, train_tim_x, _ = self.fixed_windows_from_sequences(
             x_train_norm, t.window_size, t.adaptive_window, t.seq_len, t.min_len
         )
-        val_seq_x, val_tim_x, _ = self.fixed_windows_from_instances(
+        val_seq_x, val_tim_x, _ = self.fixed_windows_from_sequences(
             x_val_norm, t.window_size, t.adaptive_window, t.seq_len, t.min_len
         )
 
@@ -1409,7 +1392,7 @@ class LogBERTAdapter(LogADCompAdapter):
             th_range=None,  # Unused
             seq_range=np.arange(0, 1, 0.1),
         )
-        self.log.info("Best threshold: %s yielding F1: %s", best_th, F1)
+        self.log.info("Best threshold: %s yielding F1: %s", best_seq_th, F1)
         self.threshold = best_seq_th
 
     def _load_predictor_model(self) -> Tuple[Predictor, BERTLog]:
@@ -1454,8 +1437,8 @@ class LogBERTAdapter(LogADCompAdapter):
             return np.array(y_pred, dtype=int)
 
     @staticmethod
-    def fixed_windows_from_instances(
-        instances, window_size, adaptive_window, seq_len, min_len
+    def fixed_windows_from_sequences(
+        sequences, window_size, adaptive_window, seq_len, min_len
     ):
         """
         Generate log_seqs and tim_seqs directly from a list of instances without
@@ -1464,7 +1447,7 @@ class LogBERTAdapter(LogADCompAdapter):
         Each instance is expected to have a 'sequence' attribute that is a list of tokens.
         Tokens should be either a single value (log key) or a two-element structure [log_key, timestamp].
 
-        :param instances: List of instances.
+        :param sequences: List of sequences.
         :param window_size: Window size for segmentation.
         :param adaptive_window: Boolean flag for adaptive windowing.
         :param seq_len: Maximum number of tokens per session.
@@ -1477,9 +1460,9 @@ class LogBERTAdapter(LogADCompAdapter):
         seq_split_cnts = []
         skipped = 0
 
-        for inst in tqdm(instances, desc="Generating fixed windows"):
+        for seq in sequences:
             log_seq, tim_seq, split_cnt = fixed_window_data(
-                inst.sequence,
+                seq,
                 window_size,
                 adaptive_window=adaptive_window,
                 seq_len=seq_len,
@@ -1503,19 +1486,18 @@ class LogBERTAdapter(LogADCompAdapter):
         log_seqs = log_seqs[sorted_indices]
         tim_seqs = tim_seqs[sorted_indices]
 
-        print(f"Processed {len(log_seqs)} sequences")
-        print(f"Skipped {skipped} sequences")
+        print(f"Processed {len(log_seqs)} sequences, skipped {skipped}")
         assert len(log_seqs) == len(tim_seqs)
         assert len(log_seqs) == len(seq_split_cnts)
         return log_seqs, tim_seqs, seq_split_cnts
 
     def _predict_helper(
-        self, p: Predictor, model: BERTLog, instances, vocab, scale=None
+        self, p: Predictor, model: BERTLog, sequences, vocab, scale=None
     ):
         total_results = []
         output_cls = []
-        logkey_test, time_test, seq_split_cnts = self.fixed_windows_from_instances(
-            instances, p.window_size, p.adaptive_window, p.seq_len, p.min_len
+        logkey_test, time_test, seq_split_cnts = self.fixed_windows_from_sequences(
+            sequences, p.window_size, p.adaptive_window, p.seq_len, p.min_len
         )
 
         seq_dataset = LogDataset(
