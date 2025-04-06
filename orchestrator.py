@@ -2,6 +2,7 @@ import argparse
 import gc
 import json
 import os
+import sys
 from pathlib import Path
 
 import optuna
@@ -28,6 +29,27 @@ def exists_and_not_empty(file_path: str) -> bool:
     )
 
 
+def parse_splits(splits: str) -> list:
+    """
+    Parses a string of comma-separated intervals and returns a list of integers.
+    :param splits: A string of comma-separated intervals (e.g., "0-9,10-19").
+    :return: A list of integers representing the parsed intervals.
+    """
+    result = []
+    for part in splits.split(","):
+        if "-" in part:
+            start, end = map(int, part.split("-"))
+            if start > end:
+                raise ValueError(f"Invalid interval: {part}")
+            result.extend(range(start, end + 1))
+        else:
+            result.append(int(part))
+    for i in result:
+        if i < 0 or i > 9:
+            raise ValueError(f"Invalid split offset: {i}")
+    return result
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -40,6 +62,13 @@ if __name__ == "__main__":
         type=str,
         help="Model to use for anomaly detection, choices: "
         + ", ".join(model_adapters),
+    )
+    parser.add_argument(
+        "--splits",
+        type=str,
+        default="0-9",
+        help="Splits to use for evaluation, "
+        "a comma separated list supporting intervals, default=0-9",
     )
     parser.add_argument(
         "--n_trials",
@@ -60,6 +89,15 @@ if __name__ == "__main__":
         help="Ratio of validation data to use",
     )
     args = parser.parse_args()
+
+    try:
+        split_offsets = parse_splits(args.splits)
+        if len(split_offsets) == 0:
+            print("Warning: No splits provided.")
+            sys.exit(1)
+    except (ValueError, TypeError) as e:
+        print(f"Error parsing splits: {e}", file=sys.stderr)
+        exit(1)
 
     with open("paths.toml", "rb") as f:
         dir_config = tomli.load(f)
@@ -208,7 +246,7 @@ if __name__ == "__main__":
     print(f"Post params usage {get_memory_usage()}")
 
     # Float offsets from 0.0 to 0.9 in steps of 0.1
-    for offset in range(0, 10):
+    for offset in split_offsets:
         offset /= 10
 
         if exists_and_not_empty(f"{config_dict['output_dir']}/metrics_{offset}.csv"):
@@ -260,7 +298,7 @@ if __name__ == "__main__":
         m_paths.clear_split_cache()
 
     dfs = []
-    for i in range(10):
+    for i in split_offsets:
         offset = i / 10
         metrics_df = pd.read_csv(f"{config_dict['output_dir']}/metrics_{offset}.csv")
         dfs.append(metrics_df)
