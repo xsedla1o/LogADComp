@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset, Dataset
 
-from dataloader import NdArr, DataLoader, skip_when_present
+from dataloader import NdArr, DataLoader
 from loglizer.loglizer.models import SVM, LogClustering
 from preprocess import Normalizer
 from sempca.const import device
@@ -37,7 +37,7 @@ from utils import log_gpu_memory_usage
 sys.path.append(str(Path(__file__).parent / "logbert"))
 
 from bert_pytorch.dataset import LogDataset, WordVocab
-from bert_pytorch.predict_log import compute_anomaly_bool, find_best_threshold
+from bert_pytorch.predict_log import compute_anomaly_bool, evaluate_threshold
 from bert_pytorch.dataset.sample import fixed_window_data
 from bert_pytorch.model import BERTLog
 from bert_pytorch import Predictor, Trainer
@@ -1235,11 +1235,12 @@ CACHED_PATH_KEYS = CACHED_DATASET_KEYS + ["vocab_path"]
 
 
 class LogBERTAdapter(LogADCompAdapter):
-    def __init__(self, paths: CachePaths, dataset="HDFS"):
+    def __init__(self, paths: CachePaths):
         super().__init__(paths)
         self.log = get_logger("LogBERTAdapter")
-        self.dataset = dataset
         self._configure_options()
+        self.vocab_size = None
+        self.threshold = None
 
     def _configure_options(self):
         """Configure the options dictionary based on the dataset."""
@@ -1292,6 +1293,7 @@ class LogBERTAdapter(LogADCompAdapter):
         vocab = WordVocab(np.concatenate([x_train, x_val], axis=0))
         self.log.debug("Vocab size: %d", len(vocab))
         self.log.debug("Saving to: %s", self.o["vocab_path"])
+        self.vocab_size = len(vocab)
         vocab.save_vocab(self.o["vocab_path"])
 
     @staticmethod
@@ -1302,7 +1304,7 @@ class LogBERTAdapter(LogADCompAdapter):
                 out_f.write(" ".join(map(str, seq)))
                 out_f.write("\n")
 
-    def set_params(self, **kwargs):
+    def set_params(self, threshold: float = 0.2, num_candidates: int = 6):
         """No hyperparameters to set directly for LogBERT, as they are managed internally."""
         self.o["window_size"] = 128
         self.o["adaptive_window"] = True
@@ -1346,11 +1348,62 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["log_freq"] = None
 
         # predict
-        self.o["num_candidates"] = 6
+        self.o["num_candidates"] = num_candidates
         self.o["gaussian_mean"] = 0
         self.o["gaussian_std"] = 1
 
-        self.threshold = 0.5  # Dummy value overwritten by fit()
+        self.threshold = threshold
+
+    def get_trial_objective(
+        self, x_train, y_train, x_val, y_val, prev_params: dict = None
+    ):
+        """Tune evaluation-specific hyperparameters.
+        - num_candidates: number of candidates to consider for anomaly detection
+        - threshold: threshold of missed predictions to trigger anomaly
+        """
+        assert self.vocab_size is not None, "Call split preprocessing first"
+        self.set_params(**prev_params)
+        self.fit(x_train, y_train, x_val, y_val)
+
+        x_train_norm = x_train[y_train == 0]
+        x_val_norm = x_val[y_val == 0]
+
+        x_train_anomaly = x_train[y_train == 1]
+        x_val_anomaly = x_val[y_val == 1]
+
+        x_norm = np.concatenate((x_train_norm, x_val_norm), axis=0)
+        x_anomaly = np.concatenate((x_train_anomaly, x_val_anomaly), axis=0)
+
+        def objective(trial: optuna.Trial):
+            threshold = trial.suggest_float("threshold", 0.0, 0.75, step=0.01)
+            n_candidates = trial.suggest_int("num_candidates", 1, self.vocab_size)
+
+            new_opts = self.o.copy()
+            new_opts["num_candidates"] = n_candidates
+            with torch.no_grad():
+                p, model = self._load_predictor_model(new_opts)
+                vocab = WordVocab.load_vocab(p.vocab_path)
+
+                normal_results, _, _ = self._predict_helper(
+                    p, model, x_norm, vocab, scale=None
+                )
+                anomaly_results, _, _ = self._predict_helper(
+                    p, model, x_anomaly, vocab, scale=None
+                )
+
+                res = evaluate_threshold(
+                    normal_results, anomaly_results, p.get_params(), threshold
+                )
+
+            if res is None:
+                self.log.debug("%s -> N/A", trial.params)
+                return 0.0
+
+            FP, TP, TN, FN, P, R, F1 = res
+            self.log.debug("%s -> FP: %d, FN: %d, F1: %.4f", trial.params, FP, FN, F1)
+            return F1
+
+        return objective
 
     def fit(self, x_train, y_train, x_val, y_val):
         """Trains the LogBERT model or loads an existing one if available."""
@@ -1366,37 +1419,13 @@ class LogBERTAdapter(LogADCompAdapter):
             x_val_norm, t.window_size, t.adaptive_window, t.seq_len, t.min_len
         )
 
-        Trainer(self.o).train_on(train_seq_x, train_tim_x, val_seq_x, val_tim_x)
+        t.train_on(train_seq_x, train_tim_x, val_seq_x, val_tim_x)
 
-        # Load best model after training to find best threshold
-        p, model = self._load_predictor_model()
-        vocab = WordVocab.load_vocab(p.vocab_path)
-
-        x_train_anomaly = x_train[y_train == 1]
-        x_val_anomaly = x_val[y_val == 1]
-
-        x_norm = np.concatenate((x_train_norm, x_val_norm), axis=0)
-        x_anomaly = np.concatenate((x_train_anomaly, x_val_anomaly), axis=0)
-
-        normal_results, _, _ = self._predict_helper(p, model, x_norm, vocab, scale=None)
-        anomaly_results, _, _ = self._predict_helper(
-            p, model, x_anomaly, vocab, scale=None
-        )
-
-        # Compute the threshold based on the training data
-        best_th, best_seq_th, FP, TP, TN, FN, P, R, F1 = find_best_threshold(
-            normal_results,
-            anomaly_results,
-            params=p.get_params(),
-            th_range=None,  # Unused
-            seq_range=np.arange(0, 1, 0.1),
-        )
-        self.log.info("Best threshold: %s yielding F1: %s", best_seq_th, F1)
-        self.threshold = best_seq_th
-
-    def _load_predictor_model(self) -> Tuple[Predictor, BERTLog]:
+    def _load_predictor_model(self, options: dict = None) -> Tuple[Predictor, BERTLog]:
         """Load the LogBERT model."""
-        p = Predictor(self.o)
+        if options is None:
+            options = self.o
+        p = Predictor(options)
         model: BERTLog = torch.load(p.model_path, weights_only=False)
         model.to(p.device)
         model.eval()
@@ -1608,15 +1637,6 @@ class LogBERTAdapter(LogADCompAdapter):
 
         # for hypersphere distance
         return total_results, output_cls, seq_split_cnts
-
-    @staticmethod
-    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
-        """No hyperparameters to tune for LogBERT."""
-
-        def objective(trial: optuna.Trial):
-            return 0.0
-
-        return objective
 
 
 model_adapters: Dict[str, Type[LogADCompAdapter]] = {
