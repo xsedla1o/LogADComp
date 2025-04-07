@@ -1375,7 +1375,7 @@ class LogBERTAdapter(LogADCompAdapter):
         x_anomaly = np.concatenate((x_train_anomaly, x_val_anomaly), axis=0)
 
         def objective(trial: optuna.Trial):
-            threshold = trial.suggest_float("threshold", 0.0, 0.75, step=0.01)
+            threshold = trial.suggest_float("threshold", 0.01, 0.3, step=0.01)
             n_candidates = trial.suggest_int("num_candidates", 1, self.vocab_size)
 
             new_opts = self.o.copy()
