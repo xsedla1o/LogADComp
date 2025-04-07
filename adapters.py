@@ -1518,6 +1518,48 @@ class LogBERTAdapter(LogADCompAdapter):
         assert len(log_seqs) == len(seq_split_cnts)
         return log_seqs, tim_seqs, seq_split_cnts
 
+    @staticmethod
+    def _logkey_detection(p: Predictor, mask_lm_output, bert_labels, masks):
+        # shape (num_masked, 2) where each row is [batch_index, token_index]
+        m_idxs = torch.nonzero(masks, as_tuple=False)
+        # extracts all masked token outputs, flattening to (num_masked, V)
+        flat_masked_output = mask_lm_output[m_idxs[:, 0], m_idxs[:, 1]]
+        flat_masked_labels = bert_labels[m_idxs[:, 0], m_idxs[:, 1]]
+
+        # Compute how many masked tokens each batch element has
+        B = mask_lm_output.size(0)
+        batch_idx = m_idxs[:, 0]
+        counts = torch.bincount(batch_idx, minlength=B)  # shape: (B,)
+        max_count = counts.max().item()
+
+        # Compute the position (within each batch) for each masked token.
+        offsets = torch.zeros_like(counts)
+        if B > 0:
+            offsets[1:] = torch.cumsum(counts, dim=0)[:-1]
+        # Each token's position is its overall index minus the offset for its batch.
+        flat_0_positions = torch.arange(m_idxs.size(0), device=batch_idx.device)
+        positions = flat_0_positions - offsets[batch_idx]
+
+        # Allocate padded tensors, shape (B, max_count, V), (B, max_count)
+        padded_masked_output = torch.zeros(
+            (B, max_count, mask_lm_output.size(-1)), device=mask_lm_output.device
+        )
+        padded_masked_labels = torch.full(
+            (B, max_count), -1, device=flat_masked_labels.device
+        )
+
+        # Use advanced indexing to scatter each token into the proper position
+        padded_masked_output[batch_idx, positions] = flat_masked_output
+        padded_masked_labels[batch_idx, positions] = flat_masked_labels
+
+        # Create valid mask to disregard padding entries
+        valid_mask = padded_masked_labels != -1
+
+        undetected_tokens, _ = p.detect_logkey_anomaly_vectorized(
+            padded_masked_output, padded_masked_labels, valid_mask
+        )
+        return undetected_tokens
+
     def _predict_helper(
         self, p: Predictor, model: BERTLog, sequences, vocab, scale=None
     ):
@@ -1558,9 +1600,10 @@ class LogBERTAdapter(LogADCompAdapter):
             # bert_label, time_label: batch_size x session_size
             # in session, some logkeys are masked
 
-            mask_lm_output, mask_tm_output = (
+            mask_lm_output, mask_tm_output, bert_labels = (
                 result["logkey_output"],
                 result["time_output"],
+                data["bert_label"],
             )
             output_cls += result["cls_output"].tolist()
 
@@ -1569,37 +1612,12 @@ class LogBERTAdapter(LogADCompAdapter):
             svdd_labels = []
             total_logkeys = torch.sum(data["bert_input"] > 0, dim=1).tolist()
 
-            masks = data["bert_label"] > 0
+            masks = bert_labels > 0
             masked_tokens = torch.sum(masks, dim=1).tolist()
 
             if p.is_logkey:
-                # shape (num_masked, 2) where each row is [batch_index, token_index]
-                m_idxs = torch.nonzero(masks, as_tuple=False)
-                # extracts all masked token outputs, flattening to (num_masked, V)
-                flat_masked_output = mask_lm_output[m_idxs[:, 0], m_idxs[:, 1]]
-                flat_masked_labels = data["bert_label"][m_idxs[:, 0], m_idxs[:, 1]]
-
-                B = mask_lm_output.shape[0]
-                batch_masked_outputs = []
-                batch_masked_labels = []
-                for b in range(B):
-                    # Get all rows corresponding to batch element b
-                    idxs = m_idxs[:, 0] == b
-                    batch_masked_outputs.append(flat_masked_output[idxs])
-                    batch_masked_labels.append(flat_masked_labels[idxs])
-
-                # Pad for batch processing, shape (B, max(num_masked in batch), V)
-                padded_masked_output = pad_sequence(
-                    batch_masked_outputs, batch_first=True, padding_value=-1
-                )
-                padded_masked_labels = pad_sequence(
-                    batch_masked_labels, batch_first=True, padding_value=-1
-                )
-                # To discard padding values
-                valid_mask = padded_masked_labels != -1
-
-                undetected_tokens, _ = p.detect_logkey_anomaly_vectorized(
-                    padded_masked_output, padded_masked_labels, valid_mask
+                undetected_tokens = self._logkey_detection(
+                    p, mask_lm_output, bert_labels, masks
                 )
 
             if p.hypersphere_loss_test:
@@ -1623,7 +1641,7 @@ class LogBERTAdapter(LogADCompAdapter):
                         if p.hypersphere_loss_test
                         else 0,
                     }
-                    for j in range(len(data["bert_label"]))
+                    for j in range(len(bert_labels))
                 )
             )
             telem["vectorized detection"] += time.time() - tsv
