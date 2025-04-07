@@ -7,3 +7,6 @@
 [submodule "logbert"]
 	path = logbert
 	url = git@github.com:xsedla1o/logbert
+[submodule "neurallog.d"]
+	path = neurallog.d
+	url = git@github.com:xsedla1o/NeuralLog.git
