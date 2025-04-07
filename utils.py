@@ -1,4 +1,5 @@
 import os
+import random
 from time import time
 from typing import ContextManager, Union, Dict
 
@@ -7,6 +8,23 @@ import psutil
 import torch
 
 from sempca.const import device
+
+
+def seed_everything(seed: int = 6):
+    """Set random seed for reproducibility.
+
+    Args:
+        seed (int): Random seed to be set. Default is 6, inherited from sempca.
+    """
+    random.seed(seed)  # Python random module.
+    np.random.seed(seed)  # Numpy module.
+    torch.manual_seed(seed)  # Torch CPU random seed module.
+    torch.cuda.manual_seed(seed)  # Torch GPU random seed module.
+    torch.cuda.manual_seed_all(seed)  # Torch multi-GPU random seed module.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["PYTHONHASHSEED"] = str(seed)
 
 
 class Timed(ContextManager):

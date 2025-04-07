@@ -14,7 +14,7 @@ from optuna.samplers import TPESampler
 from adapters import model_adapters, DualTrialAdapter, CachePaths
 from dataloader import dataloaders
 from sempca.preprocessing import DataPaths
-from utils import Timed, calculate_metrics, get_memory_usage
+from utils import Timed, calculate_metrics, get_memory_usage, seed_everything
 
 pd.options.display.max_columns = None
 pd.options.display.max_rows = None
@@ -164,7 +164,8 @@ if __name__ == "__main__":
         with Timed("Fit feature extractor and transform data"):
             x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
 
-        # Check if adapter requires training hyperparameters
+        # Training hyperparameter tuning
+        seed_everything()
         study = optuna.create_study(
             study_name="training_hyperparameters",
             direction="minimize",
@@ -214,6 +215,7 @@ if __name__ == "__main__":
             x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
 
         # Hyperparameter tuning
+        seed_everything()
         study = optuna.create_study(
             study_name="hyperparameters",
             direction="maximize",
@@ -262,6 +264,7 @@ if __name__ == "__main__":
         with Timed("Fit feature extractor and transform data"):
             x_train, x_val, x_test = model.preprocess_split(x_train, x_val, x_test)
 
+        seed_everything()
         model.set_params(**best_train_params, **best_params)
 
         with Timed("Fit model"):
