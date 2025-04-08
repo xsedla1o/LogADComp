@@ -14,6 +14,11 @@ import optuna
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from official.nlp import optimization
+from tensorflow.keras import Model
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.losses import SparseCategoricalCrossentropy
+from tensorflow.keras.utils import Sequence
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset, Dataset
 
@@ -41,6 +46,10 @@ from bert_pytorch.predict_log import compute_anomaly_bool, evaluate_threshold
 from bert_pytorch.dataset.sample import fixed_window_data
 from bert_pytorch.model import BERTLog
 from bert_pytorch import Predictor, Trainer
+
+sys.path.append(str(Path(__file__).parent / "neurallog.d"))
+
+from neurallog.models import NeuralLog
 
 
 @dataclass
@@ -1331,8 +1340,8 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["layers"] = 4
         self.o["attn_heads"] = 4
 
-        self.o["epochs"] = 200
-        self.o["warm_up_epochs"] = 10
+        self.o["epochs"] = 1
+        self.o["warm_up_epochs"] = 0
         self.o["n_epochs_stop"] = 10
         self.o["batch_size"] = 32
 
@@ -1657,6 +1666,210 @@ class LogBERTAdapter(LogADCompAdapter):
         return total_results, output_cls, seq_split_cnts
 
 
+class BatchGenerator(Sequence):
+    def __init__(self, X, Y, batch_size, max_len=75, embed_dim=768):
+        assert len(X) % batch_size == 0, "Batch size must divide the number of samples"
+        assert len(X) == len(Y), "X and Y must have the same number of samples"
+
+        self.X, self.Y = X, Y
+        self.batch_size = batch_size
+        self.max_len = max_len
+        self.embed_dim = embed_dim
+
+    def __len__(self):
+        return int(np.ceil(len(self.X) / float(self.batch_size)))
+
+    def __getitem__(self, idx):
+        x = self.X[
+            idx * self.batch_size : min((idx + 1) * self.batch_size, len(self.X))
+        ]
+        X = np.zeros((len(x), self.max_len, self.embed_dim))
+        Y = np.zeros((len(x), 2))
+        item_count = 0
+        for i in range(
+            idx * self.batch_size, min((idx + 1) * self.batch_size, len(self.X))
+        ):
+            x = self.X[i]
+            if len(x) > self.max_len:
+                x = x[-self.max_len :]
+            x = np.pad(
+                np.array(x),
+                pad_width=((self.max_len - len(x), 0), (0, 0)),
+                mode="constant",
+                constant_values=0,
+            )
+            X[item_count] = np.reshape(x, [self.max_len, self.embed_dim])
+            Y[item_count] = self.Y[i]
+            item_count += 1
+        return X[:], Y[:, 0]
+
+
+class NeuralLogAdapter(LogADCompAdapter):
+    def __init__(self, paths: CachePaths):
+        super().__init__(paths)
+        self._model: Model = None
+        self._model_path = str(self.paths.split / "neural_log.hdf5")
+        self._fitted = False
+
+    @staticmethod
+    def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:
+        return loader.get_bert_embedding_sequences()
+
+    @staticmethod
+    def preprocess_split(
+        x_train: NdArr, x_val: NdArr, x_test: NdArr
+    ) -> tuple[NdArr, NdArr, NdArr]:
+        """No split normalization is applied."""
+        return x_train, x_val, x_test
+
+    @staticmethod
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
+        """No hyperparameters for now."""
+
+        def objective(trial: optuna.Trial) -> float:
+            return 0.0
+
+        return objective
+
+    def set_params(
+        self,
+        embed_dim: int = 768,
+        ff_dim: int = 2048,
+        max_len: int = 75,
+        num_heads: int = 12,
+        dropout: float = 0.1,
+        train_batch_size: int = 256,
+        train_epochs: int = 10,
+        test_batch_size: int = 1024,
+    ):
+        """
+        Args:
+            embed_dim: dimensionality of token (line) embeddings
+            ff_dim: hidden layer size in feed forward network in transformer block
+            max_len: max sequence length in the dataset (lines)
+            num_heads: number of attention heads in the transformer block
+            dropout: dropout rate for the transformer block
+            train_batch_size: batch size for training
+            train_epochs: number of epochs for training
+            test_batch_size: batch size for testing
+        """
+        self._model = NeuralLog(embed_dim, ff_dim, max_len, num_heads, dropout)
+        self.train_batch_size = train_batch_size
+        self.train_epochs = train_epochs
+        self.test_batch_size = test_batch_size
+        self._fitted = False
+
+    def fit(self, x_train, y_train, x_val, y_val):
+        """Fit the model on the training data, allowing for validation"""
+        batch_size = self.train_batch_size
+
+        training_generator = BatchGenerator(x_train, y_train, batch_size)
+        validate_generator = BatchGenerator(x_val, y_val, batch_size)
+
+        self.train(
+            training_generator,
+            validate_generator,
+            num_train_samples=len(x_train),
+            num_val_samples=len(x_val),
+            batch_size=batch_size,
+            epoch_num=self.train_epochs,
+            model_name=self._model_path,
+        )
+        self._fitted = True
+
+    def train(
+        self,
+        training_generator,
+        validate_generator,
+        num_train_samples,
+        num_val_samples,
+        batch_size,
+        epoch_num,
+        model_name=None,
+    ):
+        epochs = epoch_num
+        steps_per_epoch = num_train_samples
+        num_train_steps = steps_per_epoch * epochs
+        num_warmup_steps = int(0.1 * num_train_steps)
+
+        init_lr = 3e-4
+        optimizer = optimization.create_optimizer(
+            init_lr=init_lr,
+            num_train_steps=num_train_steps,
+            num_warmup_steps=num_warmup_steps,
+            optimizer_type="adamw",
+        )
+
+        loss_object = SparseCategoricalCrossentropy()
+
+        self._model.compile(loss=loss_object, metrics=["accuracy"], optimizer=optimizer)
+
+        print(self._model.summary())
+
+        # checkpoint
+        filepath = model_name
+        checkpoint = ModelCheckpoint(
+            filepath,
+            monitor="val_accuracy",
+            verbose=1,
+            save_best_only=True,
+            mode="max",
+            save_weights_only=True,
+        )
+        early_stop = EarlyStopping(
+            monitor="val_loss",
+            min_delta=0,
+            patience=5,
+            verbose=0,
+            mode="auto",
+            baseline=None,
+            restore_best_weights=True,
+        )
+        callbacks_list = [checkpoint, early_stop]
+
+        self._model.fit(
+            training_generator,
+            steps_per_epoch=int(num_train_samples / batch_size),
+            epochs=epoch_num,
+            verbose=1,
+            validation_data=validate_generator,
+            validation_steps=int(num_val_samples / batch_size),
+            workers=min(16, int(os.getenv("PBS_NCPUS", os.cpu_count()))),
+            max_queue_size=32,
+            callbacks=callbacks_list,
+            shuffle=True,
+        )
+
+    def predict(self, x_test):
+        """Predict on the test data"""
+        if not self._fitted:
+            self._model.load_weights(self._model_path)
+            self._fitted = True
+
+        batch_size = self.test_batch_size
+        unpadded_len = len(x_test)
+        num_pad = batch_size - len(x_test) % batch_size
+
+        # Let me know if you find a better way to do this
+        pad_embed = np.zeros_like(x_test[-1][0])
+        pad_item = [pad_embed] * len(x_test[-1])
+        pad_x = np.empty(num_pad, dtype=object)
+        pad_x.fill(pad_item)
+
+        x, y = np.hstack((x_test, pad_x)), np.zeros(unpadded_len + num_pad)
+
+        test_loader = BatchGenerator(x, y, batch_size)
+        prediction = self._model.predict(
+            test_loader,
+            steps=(len(x) // batch_size),
+            workers=16,
+            max_queue_size=32,
+            verbose=1,
+        )
+        prediction = np.argmax(prediction[:unpadded_len], axis=1)
+        return prediction
+
+
 model_adapters: Dict[str, Type[LogADCompAdapter]] = {
     "PCA": PCAAdapter,
     "SemPCA": SemPCAAdapter,
@@ -1666,4 +1879,5 @@ model_adapters: Dict[str, Type[LogADCompAdapter]] = {
     "LogAnomaly": LogAnomalyAdapter,
     "LogRobust": LogRobustAdapter,
     "LogBERT": LogBERTAdapter,
+    "NeuralLog": NeuralLogAdapter,
 }
