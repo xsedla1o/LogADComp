@@ -1668,7 +1668,6 @@ class LogBERTAdapter(LogADCompAdapter):
 
 class BatchGenerator(Sequence):
     def __init__(self, X, Y, batch_size, max_len=75, embed_dim=768):
-        assert len(X) % batch_size == 0, "Batch size must divide the number of samples"
         assert len(X) == len(Y), "X and Y must have the same number of samples"
 
         self.X, self.Y = X, Y
@@ -1829,11 +1828,9 @@ class NeuralLogAdapter(LogADCompAdapter):
 
         self._model.fit(
             training_generator,
-            steps_per_epoch=int(num_train_samples / batch_size),
             epochs=epoch_num,
             verbose=1,
             validation_data=validate_generator,
-            validation_steps=int(num_val_samples / batch_size),
             workers=min(16, int(os.getenv("PBS_NCPUS", os.cpu_count()))),
             max_queue_size=32,
             callbacks=callbacks_list,
@@ -1847,26 +1844,17 @@ class NeuralLogAdapter(LogADCompAdapter):
             self._fitted = True
 
         batch_size = self.test_batch_size
-        unpadded_len = len(x_test)
-        num_pad = batch_size - len(x_test) % batch_size
-
-        # Let me know if you find a better way to do this
-        pad_embed = np.zeros_like(x_test[-1][0])
-        pad_item = [pad_embed] * len(x_test[-1])
-        pad_x = np.empty(num_pad, dtype=object)
-        pad_x.fill(pad_item)
-
-        x, y = np.hstack((x_test, pad_x)), np.zeros(unpadded_len + num_pad)
+        x, y = x_test, np.zeros(len(x_test))
 
         test_loader = BatchGenerator(x, y, batch_size)
         prediction = self._model.predict(
             test_loader,
-            steps=(len(x) // batch_size),
             workers=16,
             max_queue_size=32,
             verbose=1,
         )
-        prediction = np.argmax(prediction[:unpadded_len], axis=1)
+        prediction = np.argmax(prediction, axis=1)
+
         return prediction
 
 
