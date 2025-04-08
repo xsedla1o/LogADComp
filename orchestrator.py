@@ -121,6 +121,7 @@ if __name__ == "__main__":
         "word_vec_npz": f"{dataset_dir}/{d_name}/{d_name}.word_vec.npz",
         "ecv_npz": f"{dataset_dir}/{d_name}/{d_name}.ecv.npz",
         "t_seq_npz": f"{dataset_dir}/{d_name}/{d_name}.t_seq.npz",
+        "embed_seq_npz": f"{dataset_dir}/{d_name}/{d_name}.embed_seq.npz",
         "output_dir": output_dir,
         "trials_output": f"{output_dir}/trials.csv",
         "train_hyperparameters": f"{output_dir}/train_hyperparameters.json",

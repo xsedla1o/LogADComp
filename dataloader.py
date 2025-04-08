@@ -1,6 +1,7 @@
 import csv
 import gc
 import os
+import sys
 from abc import ABC, abstractmethod
 from functools import wraps
 from logging import Logger
@@ -13,6 +14,11 @@ from preprocess import EventCounter
 from sempca.preprocessing import DataPaths, Preprocessor, BasicDataLoader, BGLLoader
 from sempca.representations import SequentialAdd, TemplateTfIdf
 from sempca.utils import get_logger
+
+sys.path.append(str(Path(__file__).parent / "neurallog.d"))
+
+from neurallog import data_loader as nl_loader
+from neurallog.data_loader import bert_encoder
 
 NdArr = np.ndarray
 NdArrPair = Tuple[np.ndarray, np.ndarray]
@@ -154,6 +160,85 @@ class DataLoader(ABC):
 
         return xs, ys
 
+    def load_embedding_sequences(self):
+        loaded = np.load(self.config["embed_seq_npz"], allow_pickle=True)
+        return loaded["block_embed_seqs"], loaded["block_labels"]
+
+    @skip_when_present("embed_seq_npz", load=load_embedding_sequences)
+    def get_bert_embedding_sequences(self):
+        _, sempca_dataloader, drop_ids = self._parse()
+        block2lines = sempca_dataloader.block2seqs
+        block2eventseq = sempca_dataloader.block2eventseq
+
+        E, content2content_id, line2content_id = self.load_neurallog()
+
+        content_id2content = {
+            c_id: content for content, c_id in content2content_id.items()
+        }
+        content_id2embedding = {
+            c_id: E[content_id2content[c_id]] for c_id in content_id2content.keys()
+        }
+
+        if drop_ids is None:
+            drop_ids = set()
+
+        print("Start generating instances.")
+
+        block_ids = []
+        block_seqs = []
+        block_labels = []
+        # Prepare semantic embedding sequences for instances.
+        for block, label in sempca_dataloader.block2label.items():
+            if block in block2eventseq:
+                block_embeddings = []
+
+                len_lines = len(block2lines[block])
+                len_events = len(block2eventseq[block])
+                if len_lines != len_events:
+                    print(
+                        f"{block}: Different lengths of lines - {len_lines}"
+                        f" and events - {len_events}"
+                    )
+
+                for x, y in zip(block2lines[block], block2eventseq[block]):
+                    if y in drop_ids:
+                        continue
+                    c_id = line2content_id.get(x, None)
+                    if c_id is None:
+                        print(f"{block}: Line not found {x}")
+                        continue
+                    emb = content_id2embedding.get(c_id, None)
+                    if emb is None:
+                        print(f"{block}: Content not found {c_id}")
+                        continue
+                    block_embeddings.append(emb)
+
+                block_ids.append(block)
+                block_labels.append(0 if label == "Normal" else 1)
+                block_seqs.append(block_embeddings)
+            else:
+                print(f"Found mismatch block: {block}. Please check.")
+
+        block_ids_np = np.array(block_ids, dtype=str)
+        block_labels_np = np.array(block_labels, dtype=int)
+        block_seqs_np = np.array(block_seqs, dtype=object)
+        np.savez_compressed(
+            self.config["embed_seq_npz"],
+            block_ids=block_ids_np,
+            block_labels=block_labels_np,
+            block_embed_seqs=block_seqs_np,
+        )
+
+        del E, content2content_id, line2content_id
+        del block2lines, block_ids, block_labels, block_seqs
+        gc.collect()
+
+        return block_seqs_np, block_labels_np
+
+    @abstractmethod
+    def load_neurallog(self) -> Tuple[dict, dict, dict]:
+        """Parse files using NeuralLog and return required structures"""
+
     def get_embedding_and_instances(self):
         preprocessor, dl, d_ids = self._parse()
         return dl.id2embed, self._get_instances(preprocessor, dl, d_ids)
@@ -257,6 +342,15 @@ class HDFS(DataLoader):
         drop_ids = {m_id}
 
         return preprocessor, dataloader, drop_ids
+
+    def load_neurallog(self) -> Tuple[dict, dict, dict]:
+        """Parse files using NeuralLog and return required structures"""
+        _data, E, content2content_id, line2content_id = nl_loader.load_HDFS_file(
+            self.config["dataset"],
+            bert_encoder,
+            skip_multi_blk=False,
+        )
+        return E, content2content_id, line2content_id
 
 
 class BGL(DataLoader):
