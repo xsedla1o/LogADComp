@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import sys
@@ -6,11 +7,12 @@ from abc import abstractmethod, ABC
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Type
+from typing import Optional, Tuple, List, Dict, Type, Iterable
 from typing import Union, Callable
 
 import numpy as np
 import optuna
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1250,18 +1252,21 @@ class LogBERTAdapter(LogADCompAdapter):
         self._configure_options()
         self.vocab_size = None
         self.threshold = None
+        self.params = None
 
     def _configure_options(self):
         """Configure the options dictionary based on the dataset."""
         self.o = {}  # Options
         self.o["device"] = device
         self.o["output_dir"] = self.paths.split
+        self.threshold_trials_path = self.paths.split / "training_trial_results.csv"
 
         model_dir = self.o["output_dir"] / "bert"
         self.paths.register_subdir(model_dir)
         self.o["model_dir"] = model_dir
 
         self.o["model_path"] = self.o["model_dir"] / "best_bert.pth"
+        self.o["model_threshold_path"] = self.o["model_dir"] / "threshold.json"
         self.o["train_vocab"] = self.o["output_dir"] / "train"
 
         self.o["vocab_path"] = self.o["output_dir"] / "vocab.pkl"  # pickle file
@@ -1340,8 +1345,8 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["layers"] = 4
         self.o["attn_heads"] = 4
 
-        self.o["epochs"] = 1
-        self.o["warm_up_epochs"] = 0
+        self.o["epochs"] = 200
+        self.o["warm_up_epochs"] = 10
         self.o["n_epochs_stop"] = 10
         self.o["batch_size"] = 32
 
@@ -1357,62 +1362,150 @@ class LogBERTAdapter(LogADCompAdapter):
         self.o["log_freq"] = None
 
         # predict
-        self.o["num_candidates"] = num_candidates
         self.o["gaussian_mean"] = 0
         self.o["gaussian_std"] = 1
 
-        self.threshold = threshold
+        # predict tuned
+        if self.params is not None:
+            self.log.info("Overriding passed values to %s", self.params)
+            self.o["num_candidates"] = self.params["num_candidates"]
+            self.threshold = self.params["threshold"]
+        else:
+            self.o["num_candidates"] = num_candidates
+            self.threshold = threshold
 
     def get_trial_objective(
         self, x_train, y_train, x_val, y_val, prev_params: dict = None
     ):
-        """Tune evaluation-specific hyperparameters.
+
+        def objective(trial: optuna.Trial):
+            return 0.0
+
+        return objective
+
+    def find_thresholds(self, x_norm, x_anomaly):
+        """Tune hyperparameters of anomaly detection logic.
         - num_candidates: number of candidates to consider for anomaly detection
         - threshold: threshold of missed predictions to trigger anomaly
         """
-        assert self.vocab_size is not None, "Call split preprocessing first"
-        self.set_params(**prev_params)
-        self.fit(x_train, y_train, x_val, y_val)
+        p, model = self._load_predictor_model()
+        vocab = WordVocab.load_vocab(p.vocab_path)
+        dl_norm, _ = self._prepare_sequences(x_norm, p, vocab)
+        dl_anomaly, _ = self._prepare_sequences(x_anomaly, p, vocab)
 
-        x_train_norm = x_train[y_train == 0]
-        x_val_norm = x_val[y_val == 0]
+        with torch.no_grad():
+            inputs_norm, outputs_norm = self._get_raw_outputs(p, model, dl_norm)
+            inputs_anomaly, outputs_anomaly = self._get_raw_outputs(
+                p, model, dl_anomaly
+            )
 
-        x_train_anomaly = x_train[y_train == 1]
-        x_val_anomaly = x_val[y_val == 1]
-
-        x_norm = np.concatenate((x_train_norm, x_val_norm), axis=0)
-        x_anomaly = np.concatenate((x_train_anomaly, x_val_anomaly), axis=0)
+        trial_results = []
 
         def objective(trial: optuna.Trial):
-            threshold = trial.suggest_float("threshold", 0.01, 0.3, step=0.01)
             n_candidates = trial.suggest_int("num_candidates", 1, self.vocab_size)
+            norm_pp_results = self._post_process_batches(
+                p, inputs_norm, outputs_norm, n_candidates
+            )
+            anomaly_pp_results = self._post_process_batches(
+                p, inputs_anomaly, outputs_anomaly, n_candidates
+            )
 
-            new_opts = self.o.copy()
-            new_opts["num_candidates"] = n_candidates
-            with torch.no_grad():
-                p, model = self._load_predictor_model(new_opts)
-                vocab = WordVocab.load_vocab(p.vocab_path)
-
-                normal_results, _, _ = self._predict_helper(
-                    p, model, x_norm, vocab, scale=None
-                )
-                anomaly_results, _, _ = self._predict_helper(
-                    p, model, x_anomaly, vocab, scale=None
-                )
-
+            max_F1 = 0
+            for thresh in range(1, 50):
+                threshold = thresh / 100  # Threshold ranges from 0.01 to 0.49
                 res = evaluate_threshold(
-                    normal_results, anomaly_results, p.get_params(), threshold
+                    norm_pp_results, anomaly_pp_results, p.get_params(), threshold
                 )
+                if res is None:
+                    continue
+                trial_results.append((n_candidates, threshold, *res))
 
-            if res is None:
-                self.log.debug("%s -> N/A", trial.params)
-                return 0.0
+                FP, TP, TN, FN, P, R, F1 = res
+                self.log.debug(
+                    "%12s -> FP: %5d, FN: %5d, F1: %2.4f",
+                    (n_candidates, threshold),
+                    FP,
+                    FN,
+                    F1,
+                )
+                max_F1 = max(max_F1, F1)
+            return max_F1
 
-            FP, TP, TN, FN, P, R, F1 = res
-            self.log.debug("%s -> FP: %d, FN: %d, F1: %.4f", trial.params, FP, FN, F1)
-            return F1
+        study = optuna.create_study(
+            study_name="LogBERT_optimization", direction="maximize"
+        )
+        study.optimize(objective, n_trials=20)
 
-        return objective
+        results_df = pd.DataFrame(
+            trial_results,
+            columns=[
+                "num_candidates",
+                "threshold",
+                "FP",
+                "TP",
+                "TN",
+                "FN",
+                "P",
+                "R",
+                "F1",
+            ],
+        )
+        results_df.to_csv(self.threshold_trials_path, index=False)
+        self.log.info(
+            "Results saved to %s", self.threshold_trials_path
+        )
+        best_params = dict(
+            results_df.loc[results_df.F1.idxmax(), ["num_candidates", "threshold"]]
+        )
+        self.log.info("Best params: %s", best_params)
+        return best_params
+
+    @staticmethod
+    def _get_raw_outputs(p: Predictor, model: BERTLog, data_loader: TorchDataLoader):
+        """Only get the model outputs without any post-processing.
+
+        Meant for usage in optimize_hyperparameters to avoid re-computing the model outputs.
+        """
+        total_results = []
+        total_inputs = []
+
+        for idx, data in enumerate(tqdm(data_loader, desc="Predicting")):
+            data = {key: value.to(p.device) for key, value in data.items()}
+            result = model(data["bert_input"], data["time_input"])
+            # Cloning tensors is necessary to allow the dataloader threads to die,
+            # otherwise program will crash due to too many files being opened.
+            # Could be solved instead with `pytorch.multiprocessing
+            # .set_sharing_strategy("file_system")`, but this seems simpler.
+            total_results.append(
+                {
+                    k: None if t is None else t.detach().clone()
+                    for k, t in result.items()
+                }
+            )
+            total_inputs.append(
+                {k: data[k].detach().clone() for k in ["bert_input", "bert_label"]}
+            )
+
+        return total_inputs, total_results
+
+    def _post_process_batches(self, p, inputs, results, n_candidates):
+        assert len(inputs) == len(results), "Inputs and results must match in length"
+        tmp_candidates = p.num_candidates
+        p.num_candidates = n_candidates
+        total_results = []
+
+        for idx, (data, result) in enumerate(
+            tqdm(zip(inputs, results), desc="Post-processing", total=len(inputs))
+        ):
+            # cls_output: batch_size x hidden_size
+            results = self._post_model_process_batch(
+                p, data, result["logkey_output"], result["cls_output"]
+            )
+            total_results.extend(results)
+
+        p.num_candidates = tmp_candidates
+        # for hypersphere distance
+        return total_results
 
     def fit(self, x_train, y_train, x_val, y_val):
         """Trains the LogBERT model or loads an existing one if available."""
@@ -1430,9 +1523,32 @@ class LogBERTAdapter(LogADCompAdapter):
 
         t.train_on(train_seq_x, train_tim_x, val_seq_x, val_tim_x)
 
+        x_train_anomaly = x_train[y_train == 1]
+        x_val_anomaly = x_val[y_val == 1]
+
+        x_norm = np.concatenate((x_train_norm, x_val_norm), axis=0)
+        x_anomaly = np.concatenate((x_train_anomaly, x_val_anomaly), axis=0)
+
+        self.params = self.find_thresholds(x_norm, x_anomaly)
+        with open(self.o["model_threshold_path"], "w") as fp:
+            json.dump(self.params, fp)
+        self.o["num_candidates"] = int(self.params["num_candidates"])
+        self.threshold = self.params["threshold"]
+
+    def _get_thresh_params(self) -> Optional[dict]:
+        """Get the parameters for thresholding."""
+        if not (os.path.exists(self.o["model_threshold_path"]) and os.path.isfile(self.o["model_threshold_path"])):
+            return None
+        with open(self.o["model_threshold_path"], "r") as fp:
+            return json.load(fp)
+
     def _load_predictor_model(self, options: dict = None) -> Tuple[Predictor, BERTLog]:
         """Load the LogBERT model."""
         if options is None:
+            self.params = self._get_thresh_params()
+            if self.params is not None:
+                self.o["num_candidates"] = int(self.params["num_candidates"])
+                self.threshold = self.params["threshold"]
             options = self.o
         p = Predictor(options)
         model: BERTLog = torch.load(p.model_path, weights_only=False)
