@@ -94,9 +94,12 @@ class CachePaths:
 
 
 class LogADCompAdapter(ABC):
-    def __init__(self, paths: CachePaths):
+    def __init__(self):
         self._model = None
-        self.paths = paths
+
+    def set_paths(self, paths: CachePaths):
+        """Set/Update paths to cache files of the model (none by default)"""
+        pass
 
     @staticmethod
     @abstractmethod
@@ -136,8 +139,8 @@ class DualTrialAdapter(LogADCompAdapter):
 
 
 class PCAAdapter(LogADCompAdapter):
-    def __init__(self, paths: CachePaths):
-        super().__init__(paths)
+    def __init__(self):
+        super().__init__()
         self._model = PCA()
         self.threshold_mult = 1.0
 
@@ -190,8 +193,8 @@ class PCAAdapter(LogADCompAdapter):
 
 
 class SemPCAAdapter(PCAAdapter):
-    def __init__(self, paths: CachePaths):
-        super().__init__(paths)
+    def __init__(self):
+        super().__init__()
         self._model = PCAPlusPlus()
         self.threshold_mult = 1.0
 
@@ -238,8 +241,8 @@ class SemPCAAdapter(PCAAdapter):
 
 
 class SVMAdapter(LogADCompAdapter):
-    def __init__(self, paths: CachePaths):
-        super().__init__(paths)
+    def __init__(self):
+        super().__init__()
         self._model = SVM()
 
     @staticmethod
@@ -292,8 +295,8 @@ class SVMAdapter(LogADCompAdapter):
 
 
 class LogClusterAdapter(LogADCompAdapter):
-    def __init__(self, paths: CachePaths):
-        super().__init__(paths)
+    def __init__(self):
+        super().__init__()
         self._model = LogClustering()
 
     @staticmethod
@@ -336,8 +339,8 @@ class LogClusterAdapter(LogADCompAdapter):
 
 
 class SemPCALSTMAdapter(DualTrialAdapter, ABC):
-    def __init__(self, paths: CachePaths, window=10):
-        super().__init__(paths)
+    def __init__(self, window=10):
+        super().__init__()
         self.log = get_logger("SemPCALSTMAdapter")
         self.window = window
 
@@ -445,8 +448,8 @@ class SemPCALSTMAdapter(DualTrialAdapter, ABC):
 
 
 class DeepLogAdapter(SemPCALSTMAdapter):
-    def __init__(self, paths: CachePaths, window=10, in_size=1):
-        super().__init__(paths, window)
+    def __init__(self, window=10, in_size=1):
+        super().__init__(window)
         self.log = get_logger("DeepLogAdapter")
         self._model: Optional[DeepLog] = None
         self.pad = 0
@@ -688,8 +691,8 @@ class DeepLogAdapter(SemPCALSTMAdapter):
 
 
 class LogAnomalyAdapter(SemPCALSTMAdapter):
-    def __init__(self, paths: CachePaths, window=10):
-        super().__init__(paths, window)
+    def __init__(self, window=10):
+        super().__init__(window)
         self.log = get_logger("LogAnomalyAdapter")
         self._model: Optional[LogAnomaly] = None
         self.vocab: Optional[Vocab] = None
@@ -993,8 +996,8 @@ class InstanceDataset(Dataset):
 
 
 class LogRobustAdapter(LogADCompAdapter):
-    def __init__(self, paths: CachePaths):
-        super().__init__(paths)
+    def __init__(self):
+        super().__init__()
         self.log = get_logger("LogRobustAdapter")
         self._model: Optional[LogRobust] = None
         self.vocab: Optional[Vocab] = None
@@ -1246,37 +1249,34 @@ CACHED_PATH_KEYS = CACHED_DATASET_KEYS + ["vocab_path"]
 
 
 class LogBERTAdapter(LogADCompAdapter):
-    def __init__(self, paths: CachePaths):
-        super().__init__(paths)
+    def __init__(self):
+        super().__init__()
         self.log = get_logger("LogBERTAdapter")
-        self._configure_options()
         self.vocab_size = None
         self.threshold = None
         self.params = None
 
-    def _configure_options(self):
-        """Configure the options dictionary based on the dataset."""
-        self.o = {}  # Options
-        self.o["device"] = device
-        self.o["output_dir"] = self.paths.split
-        self.threshold_trials_path = self.paths.split / "training_trial_results.csv"
+    def set_paths(self, paths: CachePaths):
+        """Set the paths for the LogBERT adapter."""
+        output_d = paths.split
+        model_d = output_d / "bert"
+        paths.register_subdir(model_d)
+        self.threshold_trials_path = paths.split / "training_trial_results.csv"
 
-        model_dir = self.o["output_dir"] / "bert"
-        self.paths.register_subdir(model_dir)
-        self.o["model_dir"] = model_dir
-
-        self.o["model_path"] = self.o["model_dir"] / "best_bert.pth"
-        self.o["model_threshold_path"] = self.o["model_dir"] / "threshold.json"
-        self.o["train_vocab"] = self.o["output_dir"] / "train"
-
-        self.o["vocab_path"] = self.o["output_dir"] / "vocab.pkl"  # pickle file
-
-        self.o["scale_path"] = self.o["model_dir"] / "scale.pkl"
-
-        self.o["train_path"] = self.o["output_dir"] / "train"
-        self.o["valid_path"] = self.o["output_dir"] / "valid"
-        self.o["test_normal_path"] = self.o["output_dir"] / "test_normal"
-        self.o["test_anomaly_path"] = self.o["output_dir"] / "test_anomaly"
+        self.o = {
+            "device": device,
+            "output_dir": output_d,
+            "model_dir": model_d,
+            "model_path": model_d / "best_bert.pth",
+            "model_threshold_path": model_d / "threshold.json",
+            "train_vocab": output_d / "train",
+            "vocab_path": output_d / "vocab.pkl",
+            "scale_path": model_d / "scale.pkl",
+            "train_path": output_d / "train",
+            "valid_path": output_d / "valid",
+            "test_normal_path": output_d / "test_normal",
+            "test_anomaly_path": output_d / "test_anomaly",
+        }
 
         # Ensure directories exist
         # Convert paths to strings to keep LogBERT happy
@@ -1377,7 +1377,6 @@ class LogBERTAdapter(LogADCompAdapter):
     def get_trial_objective(
         self, x_train, y_train, x_val, y_val, prev_params: dict = None
     ):
-
         def objective(trial: optuna.Trial):
             return 0.0
 
@@ -1451,9 +1450,7 @@ class LogBERTAdapter(LogADCompAdapter):
             ],
         )
         results_df.to_csv(self.threshold_trials_path, index=False)
-        self.log.info(
-            "Results saved to %s", self.threshold_trials_path
-        )
+        self.log.info("Results saved to %s", self.threshold_trials_path)
         best_params = dict(
             results_df.loc[results_df.F1.idxmax(), ["num_candidates", "threshold"]]
         )
@@ -1537,7 +1534,10 @@ class LogBERTAdapter(LogADCompAdapter):
 
     def _get_thresh_params(self) -> Optional[dict]:
         """Get the parameters for thresholding."""
-        if not (os.path.exists(self.o["model_threshold_path"]) and os.path.isfile(self.o["model_threshold_path"])):
+        if not (
+            os.path.exists(self.o["model_threshold_path"])
+            and os.path.isfile(self.o["model_threshold_path"])
+        ):
             return None
         with open(self.o["model_threshold_path"], "r") as fp:
             return json.load(fp)
@@ -1833,11 +1833,13 @@ class BatchGenerator(Sequence):
 
 
 class NeuralLogAdapter(LogADCompAdapter):
-    def __init__(self, paths: CachePaths):
-        super().__init__(paths)
+    def __init__(self):
+        super().__init__()
         self._model: Model = None
-        self._model_path = str(self.paths.split / "neural_log.hdf5")
         self._fitted = False
+
+    def set_paths(self, paths: CachePaths):
+        self._model_path = str(paths.split / "neural_log.hdf5")
 
     @staticmethod
     def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:

@@ -148,7 +148,8 @@ if __name__ == "__main__":
     dataloader = dataloaders[d_name](config_dict, paths)
     dataloader.get()
 
-    model = model_adapters[model_name](m_paths)
+    model = model_adapters[model_name]()
+    model.set_paths(m_paths)
     xs, ys = model.transform_representation(dataloader)
     print(f"Transformed usage {get_memory_usage()}")
 
