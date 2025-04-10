@@ -1449,13 +1449,12 @@ class LogBERTAdapter(LogADCompAdapter):
         """Makes predictions using LogBERT."""
         with torch.no_grad():
             p, model = self._load_predictor_model()
-
             vocab = WordVocab.load_vocab(p.vocab_path)
+            test_dl, seq_split_cnts = self._prepare_sequences(x_test, p, vocab)
 
-            scale = None
             with Timed("Running model to get anomaly scores"):
-                test_normal_results, test_normal_errors, seq_split_cnts = (
-                    self._predict_helper(p, model, x_test, vocab, scale)
+                test_normal_results, test_normal_errors = self._predict_helper(
+                    p, model, test_dl
                 )
 
             with Timed("Detecting anomalies based on threshold"):
@@ -1569,11 +1568,11 @@ class LogBERTAdapter(LogADCompAdapter):
         )
         return undetected_tokens
 
-    def _predict_helper(
-        self, p: Predictor, model: BERTLog, sequences, vocab, scale=None
-    ):
-        total_results = []
-        output_cls = []
+    def _prepare_sequences(
+        self, sequences, p: Predictor, vocab: WordVocab
+    ) -> Tuple[TorchDataLoader, List[int]]:
+        """Prepare sequences for prediction."""
+        # Convert sequences to the format expected by the model.
         logkey_test, time_test, seq_split_cnts = self.fixed_windows_from_sequences(
             sequences, p.window_size, p.adaptive_window, p.seq_len, p.min_len
         )
@@ -1589,13 +1588,20 @@ class LogBERTAdapter(LogADCompAdapter):
             mask_ratio=p.mask_ratio,
         )
 
-        # use large batch size in test data
         data_loader = TorchDataLoader(
             seq_dataset,
             batch_size=p.batch_size,
             num_workers=p.num_workers,
             collate_fn=seq_dataset.collate_fn,
         )
+        return data_loader, seq_split_cnts
+
+    def _predict_helper(
+        self, p: Predictor, model: BERTLog, data_loader: TorchDataLoader
+    ):
+        total_results = []
+        output_cls = []
+
         telem = defaultdict(float)
         t_begin = time.time()
         for idx, data in enumerate(tqdm(data_loader, desc="Predicting")):
@@ -1604,55 +1610,15 @@ class LogBERTAdapter(LogADCompAdapter):
             result = model(data["bert_input"], data["time_input"])
             telem["forward"] += time.time() - ts
 
-            # mask_lm_output, mask_tm_output: batch_size x session_size x vocab_size
             # cls_output: batch_size x hidden_size
-            # bert_label, time_label: batch_size x session_size
-            # in session, some logkeys are masked
-
-            mask_lm_output, mask_tm_output, bert_labels = (
-                result["logkey_output"],
-                result["time_output"],
-                data["bert_label"],
-            )
             output_cls += result["cls_output"].tolist()
 
             tsv = time.time()
-            undetected_tokens = []
-            svdd_labels = []
-            total_logkeys = torch.sum(data["bert_input"] > 0, dim=1).tolist()
-
-            masks = bert_labels > 0
-            masked_tokens = torch.sum(masks, dim=1).tolist()
-
-            if p.is_logkey:
-                undetected_tokens = self._logkey_detection(
-                    p, mask_lm_output, bert_labels, masks
-                )
-
-            if p.hypersphere_loss_test:
-                # detect by deepSVDD distance
-                assert result["cls_output"][0].size() == p.center.size()
-                dist = torch.sqrt(
-                    torch.sum((result["cls_output"] - p.center) ** 2, dim=1)
-                )
-                svdd_labels = (dist > p.radius).long().tolist()
-
-            total_results.extend(
-                (
-                    {
-                        "num_error": 0,
-                        "undetected_tokens": undetected_tokens[j].item()
-                        if p.is_logkey
-                        else 0,
-                        "masked_tokens": masked_tokens[j],
-                        "total_logkey": total_logkeys[j],
-                        "deepSVDD_label": svdd_labels[j]
-                        if p.hypersphere_loss_test
-                        else 0,
-                    }
-                    for j in range(len(bert_labels))
-                )
+            results = self._post_model_process_batch(
+                p, data, result["logkey_output"], result["cls_output"]
             )
+            total_results.extend(results)
+
             telem["vectorized detection"] += time.time() - tsv
 
         t_total = time.time() - t_begin
@@ -1663,7 +1629,54 @@ class LogBERTAdapter(LogADCompAdapter):
         print("Profiled: " + prof_line)
 
         # for hypersphere distance
-        return total_results, output_cls, seq_split_cnts
+        return total_results, output_cls
+
+    def _post_model_process_batch(
+        self,
+        p: Predictor,
+        data: dict,
+        mask_lm_output: torch.Tensor,
+        cls_output: torch.Tensor,
+    ) -> Iterable[dict]:
+        """
+        Args:
+            p: Predictor
+            data: dict containing the input data
+            mask_lm_output: batch_size x session_size x vocab_size
+            cls_output: batch_size x hidden_size
+        """
+        # bert_label, time_label: batch_size x session_size
+        # in session, some logkeys are masked
+        bert_labels = data["bert_label"]
+
+        undetected_tokens = []
+        svdd_labels = []
+        total_logkeys = torch.sum(data["bert_input"] > 0, dim=1).tolist()
+
+        masks = bert_labels > 0
+        masked_tokens = torch.sum(masks, dim=1).tolist()
+
+        if p.is_logkey:
+            undetected_tokens = self._logkey_detection(
+                p, mask_lm_output, bert_labels, masks
+            )
+
+        if p.hypersphere_loss_test:
+            # detect by deepSVDD distance
+            assert cls_output[0].size() == p.center.size()
+            dist = torch.sqrt(torch.sum((cls_output - p.center) ** 2, dim=1))
+            svdd_labels = (dist > p.radius).long().tolist()
+
+        return (
+            {
+                "num_error": 0,
+                "undetected_tokens": undetected_tokens[j].item() if p.is_logkey else 0,
+                "masked_tokens": masked_tokens[j],
+                "total_logkey": total_logkeys[j],
+                "deepSVDD_label": svdd_labels[j] if p.hypersphere_loss_test else 0,
+            }
+            for j in range(len(bert_labels))
+        )
 
 
 class BatchGenerator(Sequence):
