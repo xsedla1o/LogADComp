@@ -352,6 +352,76 @@ class HDFS(DataLoader):
         return E, content2content_id, line2content_id
 
 
+class HDFSFixed(HDFS):
+    """
+    This class parses the HDFS dataset, but merges all templates matching
+    `BLOCK* ask [IPANDPORT] to delete .*` into a single template.
+    """
+
+    log = get_logger("DataLoader.HDFSFixed")
+
+    def __init__(self, config: dict, paths: DataPaths):
+        for key in ["dataset", "labels", "processed_labels"]:
+            config[key] = config[key].replace("HDFSFixed", "HDFS")
+        config["dataset_dir_orig"] = config["dataset_dir"].replace("HDFSFixed", "HDFS")
+
+        paths.in_file = config["dataset"]
+        paths.label_file = config["processed_labels"]
+
+        paths.dataset_dir.mkdir(parents=True, exist_ok=True)
+        self.log.debug("%s", config)
+        self.log.debug("%s", paths)
+        super().__init__(config, paths)
+
+    @skip_when_present(["dataset", "labels"])
+    def _get_dataset(self):
+        os.system(f"bash scripts/download.sh HDFS {self.config['dataset_dir_orig']}")
+
+    def _matches(self, template: str) -> bool:
+        """
+        Check if the template matches the pattern for merging.
+        """
+        return "BLOCK* ask" in template and "to delete" in template
+
+    def _parse(self) -> Tuple[Preprocessor, BasicDataLoader, set]:
+        p, dl, d_ids = super()._parse()
+
+        self.log.info("Pre-merge: %s templates", len(dl.templates))
+
+        # Find the templates to merge
+        t_ids = [k for k, t in dl.templates.items() if self._matches(t)]
+        assert len(t_ids) >= 1, "Should have found at least one template to merge"
+
+        # Find the global replacement template
+        t_lens = [len(dl.templates[t_id]) for t_id in t_ids]
+        shortest_template_id = t_ids[np.argmin(t_lens)]
+        self.log.debug(
+            "Merging templates %s into %s - %s",
+            ", ".join(map(str, t_ids)),
+            shortest_template_id,
+            dl.templates[shortest_template_id],
+        )
+
+        # Replace the templates
+        t_id_set = set(t_ids)
+        for block, seq in dl.block2eventseq.items():
+            for i, e_id in enumerate(seq):
+                if e_id in t_id_set:
+                    seq[i] = shortest_template_id
+        for line, e_id in dl.log2temp.items():
+            if e_id in t_id_set:
+                dl.log2temp[line] = shortest_template_id
+
+        # Remove the old templates
+        for t_id in t_ids:
+            del dl.templates[t_id]
+            if t_id in dl.id2embed:
+                del dl.id2embed[t_id]
+
+        self.log.info("Post-merge: %s templates", len(dl.templates))
+        return p, dl, d_ids
+
+
 class BGL(DataLoader):
     log = get_logger("DataLoader.BGL")
 
@@ -392,5 +462,6 @@ class BGL(DataLoader):
 
 dataloaders: Dict[str, Type[DataLoader]] = {
     "HDFS": HDFS,
+    "HDFSFixed": HDFSFixed,
     "BGL": BGL,
 }
