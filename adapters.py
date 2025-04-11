@@ -56,34 +56,37 @@ from neurallog.models import NeuralLog
 
 
 @dataclass
-class CachePaths:
+class ModelPaths:
     """
-    DataPaths is a dataclass that contains all the paths to the files and directories
+    ModelPaths is a dataclass that contains all the paths to the files and directories
     """
 
-    split: Union[Path, str]
+    cache: Union[Path, str]
+    artefacts: Union[Path, str]
 
     @staticmethod
-    def to_path(path: Union[str, Path, None]) -> Union[Path, None]:
+    def to_path(path: Union[str, Path]) -> Union[Path]:
         if path is not None:
-            return Path(path)
-        return None
+            path = Path(path)
+            os.makedirs(path, exist_ok=True)
+            return path
+        raise ValueError("Path must be a string or Path object")
 
     def __post_init__(self):
-        self.split = self.to_path(self.split)
-        os.makedirs(self.split, exist_ok=True)
+        self.cache = self.to_path(self.cache)
+        self.artefacts = self.to_path(self.artefacts)
         self._subdirs = []
 
     def register_subdir(self, subdir: Union[str, Path]) -> None:
         """Registers a permanent subdir under the split directory."""
         subdir = self.to_path(subdir).resolve()
-        assert str(subdir).startswith(str(self.split)), "Subdir must be under split"
+        assert str(subdir).startswith(str(self.cache)), "Subdir must be under cache"
         subdir.mkdir(parents=True, exist_ok=True)
         self._subdirs.append(subdir)
 
     def clear_split_cache(self):
         """Recursively deletes all contents of the split cache dir."""
-        for file in self.split.glob("*"):
+        for file in self.cache.glob("*"):
             print("Deleting file:", file)
             if file.is_file():
                 file.unlink()
@@ -98,7 +101,7 @@ class LogADCompAdapter(ABC):
     def __init__(self):
         self._model = None
 
-    def set_paths(self, paths: CachePaths):
+    def set_paths(self, paths: ModelPaths):
         """Set/Update paths to cache files of the model (none by default)"""
         pass
 
@@ -1257,17 +1260,18 @@ class LogBERTAdapter(LogADCompAdapter):
         self.threshold = None
         self.params = None
 
-    def set_paths(self, paths: CachePaths):
+    def set_paths(self, paths: ModelPaths):
         """Set the paths for the LogBERT adapter."""
-        output_d = paths.split
+        output_d = paths.cache
         model_d = output_d / "bert"
         paths.register_subdir(model_d)
-        self.threshold_trials_path = paths.split / "training_trial_results.csv"
+        self.threshold_trials_path = paths.artefacts / "training_trial_results.csv"
 
         self.o = {
             "device": device,
             "output_dir": output_d,
             "model_dir": model_d,
+            "artefact_dir": paths.artefacts,
             "model_path": model_d / "best_bert.pth",
             "model_threshold_path": model_d / "threshold.json",
             "train_vocab": output_d / "train",
@@ -1825,8 +1829,8 @@ class NeuralLogAdapter(LogADCompAdapter):
         self._model: Model = None
         self._fitted = False
 
-    def set_paths(self, paths: CachePaths):
-        self._model_path = str(paths.split / "neural_log.hdf5")
+    def set_paths(self, paths: ModelPaths):
+        self._model_path = str(paths.cache / "neural_log.hdf5")
 
     @staticmethod
     def transform_representation(loader: DataLoader) -> Tuple[NdArr, NdArr]:

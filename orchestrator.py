@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Iterable, Generator
 
 import optuna
 import pandas as pd
@@ -11,8 +12,9 @@ import tomli
 from optuna.pruners import PatientPruner, HyperbandPruner
 from optuna.samplers import TPESampler
 
-from adapters import model_adapters, DualTrialAdapter, CachePaths
+from adapters import model_adapters, DualTrialAdapter, ModelPaths, LogADCompAdapter
 from dataloader import dataloaders
+from sempca.const import SESSION
 from sempca.preprocessing import DataPaths
 from utils import Timed, calculate_metrics, get_memory_usage, seed_everything
 
@@ -48,6 +50,39 @@ def parse_splits(splits: str) -> list:
         if i < 0 or i > 9:
             raise ValueError(f"Invalid split offset: {i}")
     return result
+
+
+class ModelPathsManager:
+    def __init__(self, base: ModelPaths, target: LogADCompAdapter):
+        self.target = target
+        self.base = base
+        self.current = None
+        self._current_split = None
+
+    def set_split(self, split: int) -> ModelPaths:
+        if split < 0 or split > 9:
+            raise ValueError(f"Invalid split offset: {split}")
+
+        if self.current is not None and self._current_split == split:
+            return self.current
+
+        self._current_split = split
+        self.current = ModelPaths(
+            cache=self.base.cache / str(split),
+            artefacts=self.base.artefacts / str(split),
+        )
+
+        self.target.set_paths(self.current)
+        return self.current
+
+    def with_splits(self, splits: Iterable[int]) -> Generator[int, None, None]:
+        for split in splits:
+            self.set_split(split)
+            yield split
+
+    def clear_split_cache(self):
+        if self.current is not None:
+            self.current.clear_split_cache()
 
 
 if __name__ == "__main__":
@@ -136,10 +171,10 @@ if __name__ == "__main__":
         datasets_dir=config_dict["dataset_dir"],
         label_file=config_dict["processed_labels"],
     )
-    m_paths = CachePaths(
-        split=(
-            Path(dir_config["outputs"]) / ".." / "cache" / d_id / model_name
-        ).resolve()
+    base_path = Path(dir_config["outputs"]) / ".."
+    m_paths = ModelPaths(
+        cache=(base_path / "cache" / d_id / model_name).resolve(),
+        artefacts=(base_path / "artefacts" / SESSION / d_id / model_name).resolve(),
     )
     print(paths)
     print(m_paths)
@@ -149,7 +184,9 @@ if __name__ == "__main__":
     dataloader.get()
 
     model = model_adapters[model_name]()
-    model.set_paths(m_paths)
+
+    path_manager = ModelPathsManager(base=m_paths, target=model)
+
     xs, ys = model.transform_representation(dataloader)
     print(f"Transformed usage {get_memory_usage()}")
 
@@ -158,6 +195,7 @@ if __name__ == "__main__":
         with open(config_dict["train_hyperparameters"], "r") as in_f:
             best_train_params = json.load(in_f)
     elif isinstance(model, DualTrialAdapter):
+        path_manager.set_split(0)
         with Timed("Data loaded"):
             (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
                 xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=0.0
@@ -208,6 +246,7 @@ if __name__ == "__main__":
         with open(config_dict["hyperparameters"], "r") as in_f:
             best_params = json.load(in_f)
     else:
+        path_manager.set_split(0)
         with Timed("Data loaded"):
             (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
                 xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=0.0
@@ -250,7 +289,7 @@ if __name__ == "__main__":
     print(f"Post params usage {get_memory_usage()}")
 
     # Float offsets from 0.0 to 0.9 in steps of 0.1
-    for offset in split_offsets:
+    for offset in path_manager.with_splits(split_offsets):
         offset /= 10
 
         if exists_and_not_empty(f"{config_dict['output_dir']}/metrics_{offset}.csv"):
@@ -300,7 +339,6 @@ if __name__ == "__main__":
         del x_train, y_train, x_val, y_val, x_test, y_test, metrics
         gc.collect()
         print(f"Memory usage {get_memory_usage()}")
-        m_paths.clear_split_cache()
 
     dfs = []
     for i in split_offsets:
