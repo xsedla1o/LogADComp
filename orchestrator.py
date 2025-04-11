@@ -56,24 +56,24 @@ class ModelPathsManager:
     def __init__(self, base: ModelPaths, target: LogADCompAdapter):
         self.target = target
         self.base = base
-        self.current = None
+        self.curr = None
         self._current_split = None
 
     def set_split(self, split: int) -> ModelPaths:
         if split < 0 or split > 9:
             raise ValueError(f"Invalid split offset: {split}")
 
-        if self.current is not None and self._current_split == split:
-            return self.current
+        if self.curr is not None and self._current_split == split:
+            return self.curr
 
         self._current_split = split
-        self.current = ModelPaths(
+        self.curr = ModelPaths(
             cache=self.base.cache / str(split),
             artefacts=self.base.artefacts / str(split),
         )
 
-        self.target.set_paths(self.current)
-        return self.current
+        self.target.set_paths(self.curr)
+        return self.curr
 
     def with_splits(self, splits: Iterable[int]) -> Generator[int, None, None]:
         for split in splits:
@@ -81,8 +81,8 @@ class ModelPathsManager:
             yield split
 
     def clear_split_cache(self):
-        if self.current is not None:
-            self.current.clear_split_cache()
+        if self.curr is not None:
+            self.curr.clear_split_cache()
 
 
 if __name__ == "__main__":
@@ -225,6 +225,8 @@ if __name__ == "__main__":
         study.trials_dataframe().to_csv(config_dict["train_hyperparameters"])
         with open(config_dict["train_hyperparameters"], "w") as out_f:
             json.dump(study.best_params, out_f)
+        with open(path_manager.curr.artefacts / "train_hyperparameters.json", "w") as out_f:
+            json.dump(study.best_params, out_f)
 
         best_train_params = study.best_params
 
@@ -277,6 +279,8 @@ if __name__ == "__main__":
         os.makedirs(config_dict["output_dir"], exist_ok=True)
         study.trials_dataframe().to_csv(config_dict["trials_output"])
         with open(config_dict["hyperparameters"], "w") as out_f:
+            json.dump(study.best_params, out_f)
+        with open(path_manager.curr.artefacts / "hyperparameters.json", "w") as out_f:
             json.dump(study.best_params, out_f)
 
         best_params = study.best_params
@@ -334,6 +338,7 @@ if __name__ == "__main__":
         metrics_df.to_csv(
             f"{config_dict['output_dir']}/metrics_{offset}.csv", index=False
         )
+        metrics_df.to_csv(path_manager.curr.artefacts / "metrics.csv", index=False)
         print(metrics_df)
 
         del x_train, y_train, x_val, y_val, x_test, y_test, metrics
