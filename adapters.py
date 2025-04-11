@@ -1383,77 +1383,53 @@ class LogBERTAdapter(LogADCompAdapter):
 
         return objective
 
-    def find_thresholds(self, x_norm, x_anomaly):
+    def find_thresholds(self, x_norm, y_true, n_trials=20, max_threshold=0.3):
         """Tune hyperparameters of anomaly detection logic.
         - num_candidates: number of candidates to consider for anomaly detection
         - threshold: threshold of missed predictions to trigger anomaly
         """
         p, model = self._load_predictor_model()
         vocab = WordVocab.load_vocab(p.vocab_path)
-        dl_norm, _ = self._prepare_sequences(x_norm, p, vocab)
-        dl_anomaly, _ = self._prepare_sequences(x_anomaly, p, vocab)
+        dl, *reassembly_context = self._prepare_sequences(x_norm, p, vocab)
 
         with torch.no_grad():
-            inputs_norm, outputs_norm = self._get_raw_outputs(p, model, dl_norm)
-            inputs_anomaly, outputs_anomaly = self._get_raw_outputs(
-                p, model, dl_anomaly
-            )
+            inputs, outputs = self._get_raw_outputs(p, model, dl)
 
         trial_results = []
 
         def objective(trial: optuna.Trial):
             n_candidates = trial.suggest_int("num_candidates", 1, self.vocab_size)
-            norm_pp_results = self._post_process_batches(
-                p, inputs_norm, outputs_norm, n_candidates
-            )
-            anomaly_pp_results = self._post_process_batches(
-                p, inputs_anomaly, outputs_anomaly, n_candidates
-            )
+            pp_results = self._post_process_batches(p, inputs, outputs, n_candidates)
 
             max_F1 = 0
-            for thresh in range(1, 50):
+            for thresh in range(1, int(max_threshold * 100)):
                 threshold = thresh / 100  # Threshold ranges from 0.01 to 0.49
-                res = evaluate_threshold(
-                    norm_pp_results, anomaly_pp_results, p.get_params(), threshold
-                )
-                if res is None:
-                    continue
-                trial_results.append((n_candidates, threshold, *res))
 
-                FP, TP, TN, FN, P, R, F1 = res
-                self.log.debug(
-                    "%12s -> FP: %5d, FN: %5d, F1: %2.4f",
-                    (n_candidates, threshold),
-                    FP,
-                    FN,
-                    F1,
+                sample_pred_y = compute_anomaly_bool(
+                    pp_results, p.get_params(), threshold
                 )
-                max_F1 = max(max_F1, F1)
+
+                seq_pred_y = self._reassemble_predictions(
+                    sample_pred_y, *reassembly_context
+                )
+
+                metrics = calculate_metrics(y_true, seq_pred_y)
+
+                trial_results.append(
+                    {"num_candidates": n_candidates, "threshold": threshold} | metrics
+                )
+                max_F1 = max(max_F1, metrics["f1"])
             return max_F1
 
         study = optuna.create_study(
             study_name="LogBERT_optimization", direction="maximize"
         )
-        study.optimize(objective, n_trials=20)
-
-        results_df = pd.DataFrame(
-            trial_results,
-            columns=[
-                "num_candidates",
-                "threshold",
-                "FP",
-                "TP",
-                "TN",
-                "FN",
-                "P",
-                "R",
-                "F1",
-            ],
-        )
+        study.optimize(objective, n_trials=n_trials)
+        results_df = pd.DataFrame(trial_results)
         results_df.to_csv(self.threshold_trials_path, index=False)
         self.log.info("Results saved to %s", self.threshold_trials_path)
         best_params = dict(
-            results_df.loc[results_df.F1.idxmax(), ["num_candidates", "threshold"]]
+            results_df.loc[results_df.f1.idxmax(), ["num_candidates", "threshold"]]
         )
         self.log.info("Best params: %s", best_params)
         return best_params
@@ -1521,13 +1497,10 @@ class LogBERTAdapter(LogADCompAdapter):
 
         t.train_on(train_seq_x, train_tim_x, val_seq_x, val_tim_x)
 
-        x_train_anomaly = x_train[y_train == 1]
-        x_val_anomaly = x_val[y_val == 1]
+        xs = np.concatenate([x_train, x_val], axis=0)
+        ys = np.concatenate([y_train, y_val], axis=0)
 
-        x_norm = np.concatenate((x_train_norm, x_val_norm), axis=0)
-        x_anomaly = np.concatenate((x_train_anomaly, x_val_anomaly), axis=0)
-
-        self.params = self.find_thresholds(x_norm, x_anomaly)
+        self.params = self.find_thresholds(xs, ys)
         with open(self.o["model_threshold_path"], "w") as fp:
             json.dump(self.params, fp)
         self.o["num_candidates"] = int(self.params["num_candidates"])
