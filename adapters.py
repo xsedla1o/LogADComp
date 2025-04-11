@@ -21,6 +21,7 @@ from tensorflow.keras import Model
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from tensorflow.keras.losses import SparseCategoricalCrossentropy
 from tensorflow.keras.utils import Sequence
+from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset, Dataset
 
@@ -1511,10 +1512,10 @@ class LogBERTAdapter(LogADCompAdapter):
         x_train_norm = x_train[y_train == 0]
         x_val_norm = x_val[y_val == 0]
 
-        train_seq_x, train_tim_x, _ = self.fixed_windows_from_sequences(
+        train_seq_x, train_tim_x, *_ = self.fixed_windows_from_sequences(
             x_train_norm, t.window_size, t.adaptive_window, t.seq_len, t.min_len
         )
-        val_seq_x, val_tim_x, _ = self.fixed_windows_from_sequences(
+        val_seq_x, val_tim_x, *_ = self.fixed_windows_from_sequences(
             x_val_norm, t.window_size, t.adaptive_window, t.seq_len, t.min_len
         )
 
@@ -1561,12 +1562,29 @@ class LogBERTAdapter(LogADCompAdapter):
             p.radius = center_dict["radius"]
         return p, model
 
+    @staticmethod
+    def _reassemble_predictions(
+        sample_y_pred: np.ndarray,
+        inverse_indices: np.ndarray,
+        seq_split_cnts: List[int],
+    ) -> np.ndarray:
+        ordered_y_pred = sample_y_pred[inverse_indices]
+
+        y_pred = []
+        start_idx = 0
+        for count in seq_split_cnts:
+            sample_pred = ordered_y_pred[start_idx : start_idx + count]
+            seq_pred = 1 if sample_pred.any() else 0
+            y_pred.append(seq_pred)
+            start_idx += count
+        return np.array(y_pred, dtype=int)
+
     def predict(self, x_test):
         """Makes predictions using LogBERT."""
         with torch.no_grad():
             p, model = self._load_predictor_model()
             vocab = WordVocab.load_vocab(p.vocab_path)
-            test_dl, seq_split_cnts = self._prepare_sequences(x_test, p, vocab)
+            test_dl, *reassembly_context = self._prepare_sequences(x_test, p, vocab)
 
             with Timed("Running model to get anomaly scores"):
                 test_normal_results, test_normal_errors = self._predict_helper(
@@ -1578,19 +1596,12 @@ class LogBERTAdapter(LogADCompAdapter):
                     test_normal_results, p.get_params(), self.threshold
                 )
 
-            y_pred = []
-            start_idx = 0
-            for count in seq_split_cnts:
-                sample_pred = sample_y_pred[start_idx : start_idx + count]
-                seq_pred = 1 if sample_pred.any() else 0
-                y_pred.append(seq_pred)
-                start_idx += count
-            return np.array(y_pred, dtype=int)
+            return self._reassemble_predictions(sample_y_pred, *reassembly_context)
 
     @staticmethod
     def fixed_windows_from_sequences(
         sequences, window_size, adaptive_window, seq_len, min_len
-    ):
+    ) -> Tuple[NdArr, NdArr, NdArr, List[int]]:
         """
         Generate log_seqs and tim_seqs directly from a list of instances without
         converting the sequences to a string.
@@ -1637,13 +1648,16 @@ class LogBERTAdapter(LogADCompAdapter):
         log_seqs = log_seqs[sorted_indices]
         tim_seqs = tim_seqs[sorted_indices]
 
+        inverse_indices = np.empty_like(sorted_indices)
+        inverse_indices[sorted_indices] = np.arange(sorted_indices.size)
+
         print(f"Processed {len(log_seqs)} sequences, skipped {skipped}")
         assert len(log_seqs) == len(tim_seqs)
         assert len(log_seqs) == len(seq_split_cnts)
-        return log_seqs, tim_seqs, seq_split_cnts
+        return log_seqs, tim_seqs, inverse_indices, seq_split_cnts
 
     @staticmethod
-    def _logkey_detection(p: Predictor, mask_lm_output, bert_labels, masks):
+    def _logkey_detection(p: Predictor, mask_lm_output: Tensor, bert_labels, masks):
         # shape (num_masked, 2) where each row is [batch_index, token_index]
         m_idxs = torch.nonzero(masks, as_tuple=False)
         # extracts all masked token outputs, flattening to (num_masked, V)
@@ -1686,10 +1700,10 @@ class LogBERTAdapter(LogADCompAdapter):
 
     def _prepare_sequences(
         self, sequences, p: Predictor, vocab: WordVocab
-    ) -> Tuple[TorchDataLoader, List[int]]:
+    ) -> Tuple[TorchDataLoader, np.ndarray, List[int]]:
         """Prepare sequences for prediction."""
         # Convert sequences to the format expected by the model.
-        logkey_test, time_test, seq_split_cnts = self.fixed_windows_from_sequences(
+        logkey_test, time_test, *reassembly_ctx = self.fixed_windows_from_sequences(
             sequences, p.window_size, p.adaptive_window, p.seq_len, p.min_len
         )
 
@@ -1710,7 +1724,7 @@ class LogBERTAdapter(LogADCompAdapter):
             num_workers=p.num_workers,
             collate_fn=seq_dataset.collate_fn,
         )
-        return data_loader, seq_split_cnts
+        return data_loader, reassembly_ctx[0], reassembly_ctx[1]
 
     def _predict_helper(
         self, p: Predictor, model: BERTLog, data_loader: TorchDataLoader
