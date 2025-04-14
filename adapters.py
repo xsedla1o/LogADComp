@@ -748,10 +748,10 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 "batch_size", [128, 512, 1024, 2048]
             )
             self.learning_rate = trial.suggest_categorical(
-                "learning_rate", [1e-4, 1e-3, 2e-3, 5e-3, 1e-2]
+                "learning_rate", [1e-3, 2e-3, 5e-3]
             )
             self.learning_rate_decay = trial.suggest_float(
-                "learning_rate_decay", 0.7, 0.99, step=0.01
+                "learning_rate_decay", 0.85, 0.99, step=0.01
             )
 
             model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
