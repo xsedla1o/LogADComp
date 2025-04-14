@@ -210,7 +210,7 @@ if __name__ == "__main__":
             study_name="training_hyperparameters",
             direction="minimize",
             sampler=TPESampler(),
-            pruner=PatientPruner(HyperbandPruner(), patience=1),
+            pruner=PatientPruner(HyperbandPruner(), patience=10),
         )
         with Timed("Optimize training hyperparameters"):
             study.optimize(
@@ -263,7 +263,7 @@ if __name__ == "__main__":
             study_name="hyperparameters",
             direction="maximize",
             sampler=TPESampler(),
-            pruner=PatientPruner(HyperbandPruner(), patience=1),
+            pruner=PatientPruner(HyperbandPruner(), patience=10),
         )
         with Timed("Optimize hyperparameters"):
             study.optimize(
