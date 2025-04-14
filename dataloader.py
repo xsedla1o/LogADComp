@@ -254,6 +254,20 @@ class DataLoader(ABC):
 
         return np.asarray(instances, dtype=object), ys
 
+    def _load_random_indices(self):
+        loaded = np.loadtxt(self.config["random_indices"]).astype(int)
+        return loaded
+
+    @skip_when_present("random_indices", _load_random_indices)
+    def get_random_indices(self, num_samples: int) -> np.ndarray:
+        """
+        Get random indices for the dataset.
+        """
+        indices = np.arange(num_samples)
+        np.random.shuffle(indices)
+        np.savetxt(self.config["random_indices"], indices, fmt="%d")
+        return indices
+
     def split(
         self,
         xs: np.ndarray,
@@ -261,12 +275,18 @@ class DataLoader(ABC):
         train_ratio: float,
         val_ratio: float,
         offset: float,
+        shuffle: bool = False,
     ) -> Tuple[NdArrPair, NdArrPair, NdArrPair]:
         num_train = int(train_ratio * xs.shape[0])
         num_validation = int(val_ratio * xs.shape[0])
         num_test = xs.shape[0] - num_train - num_validation
 
         train_begin = int(offset * xs.shape[0])
+
+        if shuffle:
+            indices = self.get_random_indices(xs.shape[0])
+            xs = xs[indices]
+            ys = ys[indices]
 
         x_train, train_end = cyclic_read(xs, num_train, train_begin)
         x_validation, validation_end = cyclic_read(xs, num_validation, train_end)

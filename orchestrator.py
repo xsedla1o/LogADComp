@@ -123,6 +123,12 @@ if __name__ == "__main__":
         default=0.1,
         help="Ratio of validation data to use",
     )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle the dataset before splitting",
+        default=False,
+    )
     args = parser.parse_args()
 
     try:
@@ -143,7 +149,8 @@ if __name__ == "__main__":
     train_ratio = args.train_ratio
     val_ratio = args.val_ratio
     dataset_dir = dir_config["datasets"]
-    d_id = f"{d_name}_{train_ratio}"
+    suffix = "Shuffled" if args.shuffle else ""
+    d_id = f"{d_name}{suffix}_{train_ratio}"
     output_dir = f"{dir_config['outputs']}/{d_id}/{model_name}"
 
     config_dict = {
@@ -157,6 +164,7 @@ if __name__ == "__main__":
         "ecv_npz": f"{dataset_dir}/{d_name}/{d_name}.ecv.npz",
         "t_seq_npz": f"{dataset_dir}/{d_name}/{d_name}.t_seq.npz",
         "embed_seq_npz": f"{dataset_dir}/{d_name}/{d_name}.embed_seq.npz",
+        "random_indices": f"{dataset_dir}/{d_name}/{d_name}.random_indices.out",
         "output_dir": output_dir,
         "trials_output": f"{output_dir}/trials.csv",
         "train_hyperparameters": f"{output_dir}/train_hyperparameters.json",
@@ -225,7 +233,9 @@ if __name__ == "__main__":
         study.trials_dataframe().to_csv(config_dict["train_hyperparameters"])
         with open(config_dict["train_hyperparameters"], "w") as out_f:
             json.dump(study.best_params, out_f)
-        with open(path_manager.curr.artefacts / "train_hyperparameters.json", "w") as out_f:
+        with open(
+            path_manager.curr.artefacts / "train_hyperparameters.json", "w"
+        ) as out_f:
             json.dump(study.best_params, out_f)
 
         best_train_params = study.best_params
@@ -250,8 +260,14 @@ if __name__ == "__main__":
     else:
         path_manager.set_split(0)
         with Timed("Data loaded"):
+            seed_everything()
             (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
-                xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=0.0
+                xs,
+                ys,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                offset=0.0,
+                shuffle=args.shuffle,
             )
 
         with Timed("Fit feature extractor and transform data"):
