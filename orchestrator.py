@@ -206,7 +206,12 @@ if __name__ == "__main__":
         path_manager.set_split(0)
         with Timed("Data loaded"):
             (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
-                xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=0.0
+                xs,
+                ys,
+                train_ratio=train_ratio,
+                val_ratio=val_ratio,
+                offset=0.0,
+                shuffle=args.shuffle,
             )
 
         with Timed("Fit feature extractor and transform data"):
@@ -319,7 +324,12 @@ if __name__ == "__main__":
             print(f"Evaluating split with offset {offset}")
 
         (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
-            xs, ys, train_ratio=train_ratio, val_ratio=val_ratio, offset=offset
+            xs,
+            ys,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            offset=offset,
+            shuffle=args.shuffle,
         )
 
         with Timed("Fit feature extractor and transform data"):
