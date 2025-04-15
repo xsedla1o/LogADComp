@@ -17,8 +17,6 @@ from sempca.utils import get_logger
 
 sys.path.append(str(Path(__file__).parent / "neurallog.d"))
 
-from neurallog import data_loader as nl_loader
-
 NdArr = np.ndarray
 NdArrPair = Tuple[np.ndarray, np.ndarray]
 
@@ -364,6 +362,8 @@ class HDFS(DataLoader):
 
     def load_neurallog(self) -> Tuple[dict, dict, dict]:
         """Parse files using NeuralLog and return required structures"""
+        from neurallog import data_loader as nl_loader
+
         _data, E, content2content_id, line2content_id = nl_loader.load_HDFS_file(
             self.config["dataset"],
             "bert",
@@ -471,6 +471,8 @@ class BGL(DataLoader):
 
     def load_neurallog(self) -> Tuple[dict, dict, dict]:
         """Parse files using NeuralLog and return required structures"""
+        from neurallog import data_loader as nl_loader
+
         _data, E, content2content_id, line2content_id = (
             nl_loader.load_supercomputers_file(
                 self.config["dataset"],
