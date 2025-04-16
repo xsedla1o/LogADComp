@@ -179,10 +179,28 @@ if __name__ == "__main__":
         datasets_dir=config_dict["dataset_dir"],
         label_file=config_dict["processed_labels"],
     )
+
     base_path = Path(dir_config["outputs"]) / ".."
+
+    cache_base = dir_config.get("cache", base_path / "cache")
+    cache_base = Path(cache_base).resolve()
+    if "cache" not in dir_config:
+        print(
+            f"Warning: No cache directory found in paths.toml, "
+            f"defaulting to {cache_base}"
+        )
+
+    artefacts_base = dir_config.get("artefacts", base_path / "artefacts")
+    artefacts_base = Path(artefacts_base).resolve()
+    if "artefacts" not in dir_config:
+        print(
+            f"Warning: No artefacts directory found in paths.toml, "
+            f"defaulting to {artefacts_base}"
+        )
+
     m_paths = ModelPaths(
-        cache=(base_path / "cache" / d_id / model_name).resolve(),
-        artefacts=(base_path / "artefacts" / SESSION / d_id / model_name).resolve(),
+        cache=(cache_base / d_id / model_name).resolve(),
+        artefacts=(artefacts_base / SESSION / d_id / model_name).resolve(),
     )
     print(paths)
     print(m_paths)

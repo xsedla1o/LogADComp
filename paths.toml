@@ -1,2 +1,4 @@
 datasets = "datasets"
 outputs = "outputs"
+artefacts = "artefacts"
+cache = "cache"
