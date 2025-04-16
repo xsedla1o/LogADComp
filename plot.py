@@ -4,40 +4,13 @@ from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import pandas as pd
-import tomli
-
-from adapters import model_adapters
-from dataloader import dataloaders
 
 
-def get_dataset_paths(dir_config, dataset):
-    dataset_dir = dir_config["datasets"]
-
-    return {
-        "dataset_dir": dataset_dir,
-        "dataset": f"{dataset_dir}/{dataset}/{dataset}.log",
-        "labels": f"{dataset_dir}/{dataset}/anomaly_label.csv",
-        "processed_labels": f"{dataset_dir}/{dataset}/label.csv",
-        "embeddings": f"{dataset_dir}/glove.6B.300d.txt",
-        "loglizer_seqs": f"{dataset_dir}/{dataset}/{dataset}.seqs.csv",
-    }
-
-
-def get_model_paths(config_dict, dataset, model_name):
-    train_ratio = 0.5
-    output_dir = f"{config_dict['outputs']}/{dataset}_{train_ratio}/{model_name}"
-    return {
-        "output_dir": output_dir,
-        "trials_output": f"{output_dir}/trials.csv",
-        "hyperparameters": f"{output_dir}/hyperparameters.json",
-    }
-
-
-def load_model_dfs(config_dict):
+def load_model_dfs(model_output_dir):
     model_dfs = []
     for i in range(10):
         offset = i / 10
-        metrics_path = f"{config_dict['output_dir']}/metrics_{offset}.csv"
+        metrics_path = f"{model_output_dir}/metrics_{offset}.csv"
         if os.path.exists(metrics_path):
             metrics_df = pd.read_csv(metrics_path)
             model_dfs.append(metrics_df)
@@ -49,76 +22,130 @@ def load_model_dfs(config_dict):
         return None
 
 
-def plot_single(paths_conf, dataset, model_name):
-    config_dict = get_model_paths(paths_conf, dataset, model_name)
-
-    metrics_df = load_model_dfs(config_dict)
-    if metrics_df is None:
-        print(f"No data found for {model_name}")
-        return
-
+def plot_f1_boxplot(model_output_dir, metrics_df, model_name):
     data = metrics_df[metrics_df["split"] == "test"][["f1"]]
     fig, ax = plt.subplots()
     ax.set_ylabel("F1-score")
     ax.set_ylim(0, 1)
     ax.boxplot(data, tick_labels=[model_name])
-    plt.savefig(f"{config_dict['output_dir']}/f1.png")
-
-    data = metrics_df[metrics_df["split"] == "test"]
-    print(data)
-    print(data.describe().drop("count"))
+    plt.savefig(f"{model_output_dir}/f1.png")
+    plt.close()
 
 
-def plot_all(config: dict, dataset):
-    d_name = dataset
-    train_ratio = 0.5
-    plot_dir = f"{config['outputs']}/{d_name}_{train_ratio}"
+def plot_split_performance(model_output_dir, metrics_df):
+    test_data = metrics_df[metrics_df["split"] == "test"]
+    val_data = metrics_df[metrics_df["split"] == "val"]
+    train_data = metrics_df[metrics_df["split"] == "train"]
 
-    plot_data: Dict[str, List[float]] = {}
-    for model in model_adapters:
-        config_dict = get_model_paths(config, d_name, model)
-        model_df = load_model_dfs(config_dict)
-        if model_df is not None:
-            model_data = model_df[model_df["split"] == "test"][["f1"]]
-            plot_data[model] = model_data.values.flatten().tolist()
-
-            data = model_df[model_df["split"] == "test"]
-            print(data)
-            print(data.describe().drop("count"))
+    test_x, test_y = test_data["offset"], test_data["f1"]
+    val_x, val_y = val_data["offset"], val_data["f1"]
+    train_x, train_y = train_data["offset"], train_data["f1"]
 
     fig, ax = plt.subplots()
     ax.set_ylabel("F1-score")
     ax.set_ylim(0, 1)
+    ax.plot(test_x, test_y, label="test")
+    ax.plot(val_x, val_y, label="val")
+    ax.plot(train_x, train_y, label="train")
+    ax.set_xticks(test_x)
+    ax.set_xlabel("Cross validation offset")
+    plt.legend()
+    plt.savefig(f"{model_output_dir}/split_performance.png")
+    plt.close()
+
+
+def plot_test_split_performance(output_dir: str, models):
+    fig, ax = plt.subplots()
+    ax.set_ylabel("F1-score")
+    ax.set_ylim(0, 1)
+
+    for model in models:
+        model_df = load_model_dfs(f"{output_dir}/{model}")
+        if model_df is not None:
+            test_data = model_df[model_df["split"] == "test"]
+            test_x, test_y = test_data["offset"], test_data["f1"]
+            ax.plot(test_x, test_y, label=model)
+
+    ax.set_xlabel("Cross validation offset")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left", borderaxespad=0.0)
+    plt.savefig(f"{output_dir}/test_split_performance.png", bbox_inches="tight")
+    plt.close()
+
+
+def plot_single(
+    model_output_dir,
+    model_name,
+    verbose=False,
+):
+    metrics_df = load_model_dfs(model_output_dir)
+    if metrics_df is None:
+        print(f"No data found for {model_name}")
+        return
+
+    data = metrics_df[metrics_df["split"] == "test"]
+    data.drop(columns=["split"]).to_csv(f"{model_output_dir}/test.csv", index=False)
+
+    if verbose:
+        print(data)
+        print(data.describe().drop("count"))
+
+    plot_f1_boxplot(model_output_dir, metrics_df, model_name)
+    plot_split_performance(model_output_dir, metrics_df)
+
+
+def plot_all(output_dir, models, verbose=False):
+    plot_data: Dict[str, List[float]] = {}
+    for model in models:
+        model_df = load_model_dfs(f"{output_dir}/{model}")
+        if model_df is not None:
+            model_data = model_df[model_df["split"] == "test"][["f1"]]
+            plot_data[model] = model_data.values.flatten().tolist()
+
+            if verbose:
+                data = model_df[model_df["split"] == "test"]
+                print(model)
+                print(data)
+                print(data.describe().drop("count"))
+
+    fig, ax = plt.subplots(figsize=(2 + 1.1 * len(plot_data), 5))
+    ax.set_ylabel("F1-score")
+    ax.set_ylim(0, 1)
     ax.boxplot(plot_data.values(), tick_labels=plot_data.keys())
-    plt.savefig(f"{plot_dir}/f1.png")
+    plt.savefig(f"{output_dir}/f1.png", bbox_inches="tight")
+    plt.close()
+
+
+def recurse(output_dirs, verbose=False):
+    for output_dir in output_dirs:
+        models = [
+            m
+            for m in os.listdir(output_dir)
+            if os.path.isdir(os.path.join(output_dir, m))
+        ]
+        plot_all(output_dir, sorted(models), verbose=verbose)
+        plot_test_split_performance(output_dir, sorted(models))
+        for model in models:
+            plot_single(
+                f"{output_dir}/{model}",
+                model,
+                verbose=verbose,
+            )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "dataset",
+        "input_dirs",
+        nargs="+",
+        help="Directories with model output results, for example outputs/${DATASET_ID}/",
         type=str,
-        help="Dataset to use for anomaly detection, choices: " + ", ".join(dataloaders),
-        choices=list(dataloaders),
     )
     parser.add_argument(
-        "model",
-        nargs="?",
-        type=str,
-        help="Model to use for anomaly detection, choices: "
-        + ", ".join(model_adapters)
-        + ", default=all",
-        choices=list(model_adapters) + ["all"],
-        default="all",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output.",
+        default=False,
     )
     args = parser.parse_args()
 
-    with open("paths.toml", "rb") as f:
-        dir_config = tomli.load(f)
-
-    config_dict = get_dataset_paths(dir_config, args.dataset) | dir_config
-
-    if args.model == "all":
-        plot_all(config_dict, args.dataset)
-    else:
-        plot_single(config_dict, args.dataset, args.model)
+    recurse(args.input_dirs, args.verbose)
