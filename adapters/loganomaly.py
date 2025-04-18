@@ -16,7 +16,7 @@ from dataloader import DataLoader
 from sempca.const import device
 from sempca.models import LogAnomaly
 from sempca.module import Optimizer, Vocab
-from sempca.utils import get_logger, update_instances
+from sempca.utils import get_logger, update_sequences
 from sempca.utils import tqdm
 from utils import calculate_metrics, get_memory_usage
 from utils import log_gpu_memory_usage
@@ -50,10 +50,14 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         train_e2i, _test_e2i = self.get_event2index(
             np.concatenate((x_train, x_val), axis=0), x_test
         )
+        train_e2i = {k: v + 1 for k, v in train_e2i.items()}
+        train_e2i["PAD"] = 0
         self.num_classes = len(train_e2i)
+        self.log.info("Num classes after padding %d", self.num_classes)
 
-        x_train, x_test, _ = update_instances(x_train, x_test)
-        x_train, x_val, _ = update_instances(x_train, x_val)
+        update_sequences(x_train, train_e2i)
+        update_sequences(x_val, train_e2i)
+        update_sequences(x_test, train_e2i)
 
         return x_train, x_val, x_test
 
