@@ -4,15 +4,13 @@ from typing import Optional, List
 
 import numpy as np
 import optuna
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader as TorchDataLoader, TensorDataset
 
-from .sempca_lstm import SemPCALSTMAdapter
-
 from dataloader import DataLoader
-
 from sempca.const import device
 from sempca.models import LogAnomaly
 from sempca.module import Optimizer, Vocab
@@ -20,6 +18,8 @@ from sempca.utils import get_logger, update_sequences
 from sempca.utils import tqdm
 from utils import calculate_metrics, get_memory_usage
 from utils import log_gpu_memory_usage
+from .base import ModelPaths
+from .sempca_lstm import SemPCALSTMAdapter
 
 
 class LogAnomalyAdapter(SemPCALSTMAdapter):
@@ -33,6 +33,9 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         self.epochs = None
         self.batch_size = None
         self.learning_rate = None
+
+    def set_paths(self, paths: ModelPaths):
+        self._artefact_dir = paths.artefacts
 
     def transform_representation(self, loader: DataLoader) -> tuple:
         embedding, instances = loader.get_embedding_and_instances()
@@ -97,6 +100,8 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
             self.train(
                 model,
                 train_set,
+                val_set,
+                run_suffix=f"trial_{trial.number}",
                 callbacks=[
                     show_memory_usage,
                     lambda _, _b: log_gpu_memory_usage(self.log),
@@ -117,7 +122,10 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         train_set, _ = self.get_sliding_window_dataset(
             x_train, self.vocab.PAD, normal_only=True
         )
-        self.train(self._model, train_set)
+        val_set, _ = self.get_sliding_window_dataset(
+            x_val, self.vocab.PAD, normal_only=True
+        )
+        self.train(self._model, train_set, val_set, run_suffix="candidates")
 
         def objective(trial):
             self.num_candidates = trial.suggest_int(
@@ -154,19 +162,30 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         self._model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
         self.log.info("LogAnomaly instantiated: %s", self._model.model)
 
-    def fit(self, x_train: np.ndarray, *args, **kwargs):
+    def fit(
+        self,
+        x_train: np.ndarray,
+        y_train: np.ndarray,
+        x_val: np.ndarray,
+        y_val: np.ndarray,
+    ):
         """
         Fit the model using the provided training instances.
         """
         train_set, _ = self.get_sliding_window_dataset(
             x_train, self.vocab.PAD, normal_only=True
         )
-        self.train(self._model, train_set)
+        val_set, _ = self.get_sliding_window_dataset(
+            x_val, self.vocab.PAD, normal_only=True
+        )
+        self.train(self._model, train_set, val_set)
 
     def train(
         self,
         model: LogAnomaly,
         train_set: TensorDataset,
+        val_set: TensorDataset = None,
+        run_suffix: str = "",
         model_save_path: str = None,
         callbacks: Optional[List[Callable[[LogAnomaly, int], None]]] = None,
     ):
@@ -181,10 +200,18 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         )
         self.log.info("Model: %s", model)
         self.log.info("Number of candidates: %s", self.num_candidates)
+        self.training_log = []
 
         train_loader = TorchDataLoader(
             train_set, batch_size=self.batch_size, shuffle=True
         )
+        n_batches = len(train_loader)
+        if val_set is not None:
+            val_loader = TorchDataLoader(
+                val_set, batch_size=self.batch_size, shuffle=False
+            )
+        else:
+            val_loader = None
         vocab_size = self.vocab.vocab_size
 
         optimizer = Optimizer(
@@ -195,11 +222,10 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
         )
         self.log.debug("Scheduler decay %s", self.learning_rate_decay)
 
-        global_step = 0
-        batch_step_coef = 2048 // self.batch_size  # 2048 is the default/max batch size
         for epoch in range(self.epochs):
             model.model.train()
             start = time.strftime("%H:%M:%S")
+            start_lr = optimizer.lr[0]
             self.log.info(
                 "Epoch %d starting at %s with learning rate: %s",
                 epoch + 1,
@@ -207,9 +233,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 optimizer.lr,
             )
 
-            batch_iter = 0
             total_loss = 0
-            last_printed_batch = 0
             for seq, label in tqdm(train_loader):
                 seq = seq.to(device)
                 qual = F.one_hot(seq, vocab_size).sum(dim=1).float().to(device)
@@ -218,17 +242,6 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 total_loss += loss.item()
                 loss.backward()
 
-                if (batch_iter / batch_step_coef) % 100 == 0:
-                    self.log.info(
-                        "Step:%d, Epoch:%d, Batch:%d, avg loss:%.2f",
-                        global_step,
-                        epoch + 1,
-                        batch_iter,
-                        total_loss / (batch_iter - last_printed_batch + 1),
-                    )
-                    total_loss = 0
-                    last_printed_batch = batch_iter
-
                 nn.utils.clip_grad_norm_(
                     filter(lambda p: p.requires_grad, model.model.parameters()),
                     max_norm=1,
@@ -236,17 +249,45 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 optimizer.step()
                 optimizer.zero_grad()
 
-                batch_iter += 1
-                global_step += 1
             self.log.info("Epoch %d finished.", epoch + 1)
             if model_save_path is not None:
                 torch.save(model.model.state_dict(), model_save_path)
+
             if callbacks is not None:
                 for callback in callbacks:
                     callback(model, epoch)
+
+            avg_train_loss = total_loss / n_batches
+            self._training_log_epoch(
+                epoch, start, model, start_lr, avg_train_loss, val_loader
+            )
+
+        self._training_log_save(run_suffix)
         self.log.info("Training complete.")
 
-    def get_val_loss(self, model, val_loader: TorchDataLoader):
+    def _training_log_epoch(
+        self, epoch, start_t, model, lr, avg_train_loss, val_loader
+    ):
+        if val_loader is not None:
+            avg_valid_loss = self.get_val_loss(model, val_loader)
+        else:
+            avg_valid_loss = None
+        self.log.debug(
+            "Epoch %d loss - train: %.2f, valid: %.2f",
+            epoch + 1,
+            avg_train_loss,
+            avg_valid_loss,
+        )
+        self.training_log.append((epoch, start_t, lr, avg_train_loss, avg_valid_loss))
+
+    def _training_log_save(self, run_suffix: str = ""):
+        file = "training_log" + (f"_{run_suffix}" if run_suffix else "") + ".csv"
+        pd.DataFrame(
+            self.training_log,
+            columns=["epoch", "time", "lr", "train_loss", "valid_loss"],
+        ).to_csv(self._artefact_dir / file)
+
+    def get_val_loss(self, model: LogAnomaly, val_loader: TorchDataLoader):
         """
         Compute the validation loss for the given model.
         """
@@ -260,7 +301,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 )
                 loss = model.forward((seq, qual, None), label.to(device))
                 total_loss += loss.item()
-            return total_loss
+            return total_loss / len(val_loader)
 
     def predict(self, x_test):
         return self._predict(self._model, x_test)
