@@ -94,21 +94,12 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
             def show_memory_usage(_m, e):
                 self.log.debug("Memory usage at epoch %d: %s", e, get_memory_usage())
 
-            def pruning_callback(mod: LogAnomaly, epoch: int):
-                val_loss = self.get_val_loss(mod, val_loader)
-                self.log.info("Validation loss: %.4f", val_loss)
-
-                trial.report(val_loss, epoch)
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
-
             self.train(
                 model,
                 train_set,
                 callbacks=[
                     show_memory_usage,
                     lambda _, _b: log_gpu_memory_usage(self.log),
-                    pruning_callback,
                 ],
             )
             val_loss = self.get_val_loss(model, val_loader)
