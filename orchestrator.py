@@ -223,6 +223,7 @@ if __name__ == "__main__":
     elif isinstance(model, DualTrialAdapter):
         path_manager.set_split(0)
         with Timed("Data loaded"):
+            seed_everything()
             (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
                 xs,
                 ys,
@@ -341,6 +342,7 @@ if __name__ == "__main__":
         else:
             print(f"Evaluating split with offset {offset}")
 
+        seed_everything()
         (x_train, y_train), (x_val, y_val), (x_test, y_test) = dataloader.split(
             xs,
             ys,
