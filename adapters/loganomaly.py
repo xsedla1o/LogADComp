@@ -75,15 +75,15 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
             """Return the validation loss for a given set of hyperparameters."""
             hidden_size = trial.suggest_categorical("hidden_size", [128])
             _num_layers = trial.suggest_categorical("num_layers", [2])
-            self.epochs = trial.suggest_categorical("epochs", [10])
+            self.epochs = trial.suggest_categorical("epochs", [10, 5])
             self.batch_size = trial.suggest_categorical(
                 "batch_size", [128, 512, 1024, 2048]
             )
             self.learning_rate = trial.suggest_categorical(
-                "learning_rate", [1e-3, 2e-3, 5e-3]
+                "learning_rate", [2e-3, 1e-3, 5e-4]
             )
             self.learning_rate_decay = trial.suggest_float(
-                "learning_rate_decay", 0.85, 0.99, step=0.01
+                "learning_rate_decay", 0.74, 1.0, step=0.01
             )
 
             model = LogAnomaly(self.vocab, hidden_size, self.vocab.vocab_size, device)
