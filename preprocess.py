@@ -8,7 +8,7 @@ from sklearn.base import TransformerMixin, BaseEstimator
 from sempca.utils import get_logger
 
 
-class EventCounter(BaseEstimator,TransformerMixin):
+class EventCounter(BaseEstimator, TransformerMixin):
     logger = get_logger("EventCountVectorExtractor", "StaticLogger.log")
 
     def __init__(self, oov=False, min_count=1):
@@ -85,7 +85,7 @@ class EventCounter(BaseEstimator,TransformerMixin):
         return X
 
 
-class Normalizer(BaseEstimator,TransformerMixin):
+class Normalizer(BaseEstimator, TransformerMixin):
     logger = get_logger("Normalizer", "StaticLogger.log")
 
     def __init__(self, term_weighting=None, normalization=None):
