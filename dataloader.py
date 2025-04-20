@@ -20,6 +20,8 @@ sys.path.append(str(Path(__file__).parent / "neurallog.d"))
 NdArr = np.ndarray
 NdArrPair = Tuple[np.ndarray, np.ndarray]
 
+NUM_PROCS = min(os.cpu_count() // 2, int(os.getenv("PBS_NCPUS", 16)))
+
 
 def exists_and_not_empty(file_path: Union[Path, str]) -> bool:
     return (
@@ -83,6 +85,10 @@ class DataLoader(ABC):
         self.config = config
         self.paths = paths
         self.config["embeddings"] = paths.word2vec_file
+
+    @classmethod
+    def get_setting_suffix(cls):
+        return ""
 
     def get(self):
         """Download the dataset"""
@@ -348,7 +354,7 @@ class HDFS(DataLoader):
             paths=self.paths, semantic_repr_func=t_encoder.present
         )
 
-        dataloader.parse_by_drain(core_jobs=min(os.cpu_count() // 2, 8))
+        dataloader.parse_by_drain(core_jobs=NUM_PROCS)
 
         # Drop malformed template
         m_id = None
@@ -453,6 +459,15 @@ class BGL(DataLoader):
     def _get_dataset(self):
         os.system(f"bash scripts/download.sh BGL {self.config['dataset_dir']}")
 
+    @staticmethod
+    def get_settings():
+        return {"win_secs": 60, "win_lines": 40}
+
+    @classmethod
+    def get_setting_suffix(cls):
+        s = cls.get_settings()
+        return f"_{s['win_secs']}s_{s['win_lines']}l"
+
     def _parse(self) -> Tuple[Preprocessor, BasicDataLoader, set]:
         preprocessor = Preprocessor()
         t_encoder = TemplateTfIdf()
@@ -460,12 +475,11 @@ class BGL(DataLoader):
             paths=self.paths,
             semantic_repr_func=t_encoder.present,
             group_component=False,
-            win_secs=60,
-            win_lines=120,
             win_kind="tumbling",
+            **self.get_settings(),
         )
 
-        dataloader.parse_by_drain(core_jobs=min(os.cpu_count() // 2, 8))
+        dataloader.parse_by_drain(core_jobs=NUM_PROCS)
 
         return preprocessor, dataloader, set()
 
