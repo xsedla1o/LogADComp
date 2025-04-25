@@ -185,6 +185,7 @@ if __name__ == "__main__":
         project_root=root_dir,
         datasets_dir=config_dict["dataset_dir"],
         label_file=config_dict["processed_labels"],
+        sequence_file=f"{dataset_processed_dir}/raw_log_seqs.txt",
     )
 
     base_path = Path(dir_config["outputs"]) / ".."
