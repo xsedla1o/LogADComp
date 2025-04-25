@@ -1,0 +1,41 @@
+[general]
+homedir = "/storage/brno2/home/$USER/"
+setup = "$HOMEDIR/jobs/setup.sh"
+teardown = "$HOMEDIR/jobs/teardown.sh"
+script_dir = "$HOMEDIR/jobs/scripts/"
+
+[resources]
+Short = [
+    "select=1:ncpus=4:mem=64gb:scratch_local=40gb",
+    "walltime=24:00:00",
+]
+
+DeepLog = [
+    "select=1:ncpus=1:mem=32gb:scratch_local=40gb",
+    "ngpus=1:gpu_mem=10gb",
+    "walltime=20:00:00",
+]
+
+LogAnomaly = [
+    "select=1:ncpus=1:mem=64gb:scratch_local=40gb",
+    "ngpus=1:gpu_mem=10gb",
+    "walltime=20:00:00",
+]
+
+LogBERT = [
+    "select=1:ncpus=2:mem=32gb:scratch_local=64gb",
+    "ngpus=1:gpu_mem=10gb:gpu_cap=compute_70",
+    "walltime=22:00:00",
+]
+
+LogRobust = [
+    "select=1:ncpus=1:mem=32gb:scratch_local=40gb",
+    "ngpus=1:gpu_mem=10gb",
+    "walltime=20:00:00",
+]
+
+NeuralLog = [
+    "select=1:ncpus=1:mem=64gb:scratch_local=40gb",
+    "ngpus=1:gpu_mem=16gb",
+    "walltime=16:00:00",
+]
