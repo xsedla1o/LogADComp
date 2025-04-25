@@ -1,3 +1,4 @@
+import math
 from typing import Tuple
 from typing import Union
 
@@ -33,9 +34,12 @@ class PCAAdapter(LogADCompAdapter):
     def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
         def objective(trial: optuna.Trial):
             threshold_mult = trial.suggest_float("threshold_mult", 0.1, 2.0)
+            n_vars = x_train.shape[1]
             model = PCA(
                 n_components=trial.suggest_int(
-                    "n_components", 1, x_train.shape[1] // 10, log=True
+                    "n_components",
+                    max(math.ceil(n_vars / 100), 1),
+                    n_vars // 10,
                 ),
                 c_alpha=trial.suggest_categorical("c_alpha", [3.8906]),
             )
@@ -85,9 +89,12 @@ class SemPCAAdapter(PCAAdapter):
             # Getting a fixed threshold to work for all splits is hard,
             # maybe relying on Q statistics with a learned multiplier is better
             threshold_mult = trial.suggest_float("threshold_mult", 0.1, 2.0)
+            n_vars = x_train.shape[1]
             model = PCAPlusPlus(
                 n_components=trial.suggest_int(
-                    "n_components", 1, x_train.shape[1] // 10, log=True
+                    "n_components",
+                    max(math.ceil(n_vars / 100), 1),
+                    n_vars // 10,
                 ),
                 c_alpha=trial.suggest_categorical("c_alpha", [3.8906]),
             )
