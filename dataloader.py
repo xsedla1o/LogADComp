@@ -86,10 +86,6 @@ class DataLoader(ABC):
         self.paths = paths
         self.config["embeddings"] = paths.word2vec_file
 
-    @classmethod
-    def get_setting_suffix(cls):
-        return ""
-
     def get(self):
         """Download the dataset"""
         self._get_embeddings()
@@ -462,11 +458,6 @@ class BGL(DataLoader):
     @staticmethod
     def get_settings():
         return {"win_secs": 60, "win_lines": 40}
-
-    @classmethod
-    def get_setting_suffix(cls):
-        s = cls.get_settings()
-        return f"_{s['win_secs']}s_{s['win_lines']}l"
 
     def _parse(self) -> Tuple[Preprocessor, BasicDataLoader, set]:
         preprocessor = Preprocessor()

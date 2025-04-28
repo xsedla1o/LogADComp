@@ -150,28 +150,26 @@ if __name__ == "__main__":
     val_ratio = args.val_ratio
     dataset_dir = dir_config["datasets"]
     suffix = "Shuffled" if args.shuffle else ""
-    dl_suffix = dataloaders[d_name].get_setting_suffix()
-    d_id = f"{d_name}{suffix}{dl_suffix}_{train_ratio}"
+    d_id = f"{d_name}{suffix}_{train_ratio}"
 
     dataset_srcdir = f"{dataset_dir}/{d_name}"
-    dataset_processed_dir = f"{dataset_srcdir}{dl_suffix}"
     output_dir = f"{dir_config['outputs']}/{d_id}/{model_name}"
 
-    for d in [dataset_srcdir, dataset_processed_dir, output_dir]:
+    for d in [dataset_srcdir, output_dir]:
         os.makedirs(d, exist_ok=True)
 
     config_dict = {
         "dataset_dir": dataset_dir,
         "dataset": f"{dataset_srcdir}/{d_name}.log",
         "labels": f"{dataset_srcdir}/anomaly_label.csv",
-        "processed_labels": f"{dataset_processed_dir}/label.csv",
+        "processed_labels": f"{dataset_srcdir}/label.csv",
         "embeddings": f"{dataset_dir}/glove.6B.300d.txt",
-        "loglizer_seqs": f"{dataset_processed_dir}/{d_name}.seqs.csv",
-        "word_vec_npz": f"{dataset_processed_dir}/{d_name}.word_vec.npz",
-        "ecv_npz": f"{dataset_processed_dir}/{d_name}.ecv.npz",
-        "t_seq_npz": f"{dataset_processed_dir}/{d_name}.t_seq.npz",
-        "embed_seq_npz": f"{dataset_processed_dir}/{d_name}.embed_seq.npz",
-        "random_indices": f"{dataset_processed_dir}/{d_name}.random_indices.out",
+        "loglizer_seqs": f"{dataset_srcdir}/{d_name}.seqs.csv",
+        "word_vec_npz": f"{dataset_srcdir}/{d_name}.word_vec.npz",
+        "ecv_npz": f"{dataset_srcdir}/{d_name}.ecv.npz",
+        "t_seq_npz": f"{dataset_srcdir}/{d_name}.t_seq.npz",
+        "embed_seq_npz": f"{dataset_srcdir}/{d_name}.embed_seq.npz",
+        "random_indices": f"{dataset_srcdir}/{d_name}.random_indices.out",
         "output_dir": output_dir,
         "trials_output": f"{output_dir}/trials.csv",
         "train_hyperparameters": f"{output_dir}/train_hyperparameters.json",
@@ -185,7 +183,7 @@ if __name__ == "__main__":
         project_root=root_dir,
         datasets_dir=config_dict["dataset_dir"],
         label_file=config_dict["processed_labels"],
-        sequence_file=f"{dataset_processed_dir}/raw_log_seqs.txt",
+        sequence_file=f"{dataset_srcdir}/raw_log_seqs.txt",
     )
 
     base_path = Path(dir_config["outputs"]) / ".."
