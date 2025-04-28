@@ -444,8 +444,19 @@ class HDFSFixed(HDFS):
         return p, dl, d_ids
 
 
-class BGL(DataLoader):
+class BGLBase(DataLoader):
     log = get_logger("DataLoader.BGL")
+
+    def __init__(self, config: dict, paths: DataPaths):
+        for key in ["dataset", "labels"]:
+            config[key] = config[key].replace(self.__class__.__name__, "BGL")
+        config["dataset_dir_orig"] = config["dataset_dir"].replace(
+            self.__class__.__name__, "BGL"
+        )
+
+        paths.in_file = config["dataset"]
+        paths.dataset_dir.mkdir(parents=True, exist_ok=True)
+        super().__init__(config, paths)
 
     def get(self):
         super().get()
@@ -453,11 +464,12 @@ class BGL(DataLoader):
 
     @skip_when_present("dataset")
     def _get_dataset(self):
-        os.system(f"bash scripts/download.sh BGL {self.config['dataset_dir']}")
+        os.system(f"bash scripts/download.sh BGL {self.config['dataset_dir_orig']}")
 
     @staticmethod
+    @abstractmethod
     def get_settings():
-        return {"win_secs": 60, "win_lines": 40}
+        """Return dictionary containing settings for the BGLLoader"""
 
     def _parse(self) -> Tuple[Preprocessor, BasicDataLoader, set]:
         preprocessor = Preprocessor()
@@ -487,8 +499,21 @@ class BGL(DataLoader):
         return E, content2content_id, line2content_id
 
 
+class BGL40(BGLBase):
+    @staticmethod
+    def get_settings():
+        return {"win_secs": 60, "win_lines": 40}
+
+
+class BGL120(BGLBase):
+    @staticmethod
+    def get_settings():
+        return {"win_secs": 60, "win_lines": 120}
+
+
 dataloaders: Dict[str, Type[DataLoader]] = {
     "HDFS": HDFS,
     "HDFSFixed": HDFSFixed,
-    "BGL": BGL,
+    "BGL40": BGL40,
+    "BGL120": BGL120,
 }
