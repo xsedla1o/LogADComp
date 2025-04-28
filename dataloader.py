@@ -12,6 +12,7 @@ import numpy as np
 
 from preprocess import EventCounter
 from sempca.preprocessing import DataPaths, Preprocessor, BasicDataLoader, BGLLoader
+from sempca.preprocessing.loader.bgl import TBirdLoader
 from sempca.representations import SequentialAdd, TemplateTfIdf
 from sempca.utils import get_logger
 
@@ -511,9 +512,50 @@ class BGL120(BGLBase):
         return {"win_secs": 60, "win_lines": 120}
 
 
+class TBird(DataLoader):
+    log = get_logger("DataLoader.TBird")
+
+    def get(self):
+        super().get()
+        self._get_dataset()
+
+    @skip_when_present("dataset")
+    def _get_dataset(self):
+        os.system(f"bash scripts/download.sh TBird {self.config['dataset_dir']}")
+
+    def _parse(self) -> Tuple[Preprocessor, BasicDataLoader, set]:
+        preprocessor = Preprocessor()
+        t_encoder = TemplateTfIdf()
+        dataloader = TBirdLoader(
+            paths=self.paths,
+            semantic_repr_func=t_encoder.present,
+            group_component=False,
+            win_kind="tumbling",
+            win_secs=60,
+            win_lines=40,
+        )
+
+        dataloader.parse_by_drain(core_jobs=NUM_PROCS)
+
+        return preprocessor, dataloader, set()
+
+    def load_neurallog(self) -> Tuple[dict, dict, dict]:
+        """Parse files using NeuralLog and return required structures"""
+        from neurallog import data_loader as nl_loader
+
+        _data, E, content2content_id, line2content_id = (
+            nl_loader.load_supercomputers_file(
+                self.config["dataset"],
+                "bert",
+            )
+        )
+        return E, content2content_id, line2content_id
+
+
 dataloaders: Dict[str, Type[DataLoader]] = {
     "HDFS": HDFS,
     "HDFSFixed": HDFSFixed,
     "BGL40": BGL40,
     "BGL120": BGL120,
+    "TBird": TBird,
 }
