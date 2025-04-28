@@ -13,7 +13,7 @@ from sempca.const import device
 from sempca.models import DeepLog
 from sempca.utils import get_logger
 from sempca.utils import tqdm
-from utils import calculate_metrics, get_memory_usage
+from utils import get_memory_usage
 from utils import log_gpu_memory_usage
 from .sempca_lstm import SemPCALSTMAdapter
 
@@ -87,29 +87,6 @@ class DeepLogAdapter(SemPCALSTMAdapter):
 
         return objective
 
-    def get_trial_objective(
-        self, x_train, y_train, x_val, y_val, prev_params: dict = None
-    ):
-        """Objective function for tuning evaluation-specific hyperparameters."""
-        assert self.num_classes is not None, "Call split preprocessing first"
-
-        self.set_params(**(prev_params or {}))
-        train_set, _ = self.get_sliding_window_dataset(
-            x_train, self.pad, normal_only=True, dtype=torch.float32
-        )
-        self.train(self._model, train_set)
-
-        def objective(trial: optuna.Trial):
-            self.num_candidates = trial.suggest_int(
-                "num_candidates", 1, self.num_classes
-            )
-
-            y_pred = self.predict(x_val)
-            m = calculate_metrics(y_val, y_pred)
-            return m["f1"]
-
-        return objective
-
     def set_params(
         self,
         input_dim: int = 1,
@@ -127,11 +104,12 @@ class DeepLogAdapter(SemPCALSTMAdapter):
         self.batch_size = batch_size
         self.lr = lr
 
-    def fit(self, x_train, *args, **kwargs):
+    def fit(self, x_train, y_train, x_val, y_val):
         train_set, _ = self.get_sliding_window_dataset(
             x_train, self.pad, normal_only=True, dtype=torch.float32
         )
         self.train(self._model, train_set)
+        self._find_num_candidates(x_val, y_val)
 
     def train(
         self,

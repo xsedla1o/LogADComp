@@ -36,6 +36,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
 
     def set_paths(self, paths: ModelPaths):
         self._artefact_dir = paths.artefacts
+        super().set_paths(paths)
 
     def transform_representation(self, loader: DataLoader) -> tuple:
         embedding, instances = loader.get_embedding_and_instances()
@@ -91,32 +92,6 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
 
         return objective
 
-    def get_trial_objective(
-        self, x_train, y_train, x_val, y_val, prev_params: dict = None
-    ):
-        """Objective function for tuning evaluation-specific hyperparameters."""
-        assert self.num_classes is not None, "Call split preprocessing first"
-
-        self.set_params(**(prev_params or {}))
-        train_set, _ = self.get_sliding_window_dataset(
-            x_train, self.vocab.PAD, normal_only=True
-        )
-        val_set, _ = self.get_sliding_window_dataset(
-            x_val, self.vocab.PAD, normal_only=True
-        )
-        self.train(self._model, train_set, val_set, run_suffix="candidates")
-
-        def objective(trial):
-            self.num_candidates = trial.suggest_int(
-                "num_candidates", 1, self.num_classes
-            )
-
-            y_pred = self.predict(x_val)
-            metrics = calculate_metrics(y_val, y_pred)
-            return metrics["f1"]
-
-        return objective
-
     def set_params(
         self,
         hidden_size: int = 128,
@@ -158,6 +133,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
             x_val, self.vocab.PAD, normal_only=True
         )
         self.train(self._model, train_set, val_set)
+        self._find_num_candidates(x_val, y_val)
 
     def train(
         self,

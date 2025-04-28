@@ -2,12 +2,16 @@ from abc import ABC
 from typing import Tuple, List
 
 import numpy as np
+import optuna
+import pandas as pd
 import torch
 from torch.utils.data import TensorDataset
 
 from dataloader import NdArr
-from sempca.utils import get_logger, update_sequences
-from .base import DualTrialAdapter
+from sempca.utils import get_logger
+from sempca.utils import update_sequences
+from utils import calculate_metrics
+from .base import DualTrialAdapter, ModelPaths
 
 
 class SemPCALSTMAdapter(DualTrialAdapter, ABC):
@@ -15,6 +19,10 @@ class SemPCALSTMAdapter(DualTrialAdapter, ABC):
         super().__init__()
         self.log = get_logger("SemPCALSTMAdapter")
         self.window = window
+
+    def set_paths(self, paths: ModelPaths):
+        """Set the paths for the LogBERT adapter."""
+        self.threshold_trials_path = paths.artefacts / "training_trial_results.csv"
 
     def get_event2index(self, x_train, x_test):
         """
@@ -146,3 +154,38 @@ class SemPCALSTMAdapter(DualTrialAdapter, ABC):
             y_pred.append(sample_pred)
             start_idx += count
         return np.asarray(y_pred)
+
+    def _find_num_candidates(self, x_val, y_val):
+        """Tune `num_candidates`."""
+        assert self.num_classes is not None, "Call split preprocessing first"
+        assert self._model is not None, "Model must be trained first"
+        trial_results = []
+
+        def objective(trial: optuna.Trial):
+            self.num_candidates = trial.suggest_int(
+                "num_candidates", 1, self.num_classes
+            )
+
+            y_pred = self.predict(x_val)
+            metrics = calculate_metrics(y_val, y_pred)
+            trial_results.append({"num_candidates": self.num_candidates} | metrics)
+            return metrics["f1"]
+
+        study = optuna.create_study(study_name="N Candidates", direction="maximize")
+        study.optimize(objective, n_trials=20)
+        results_df = pd.DataFrame(trial_results)
+        results_df.to_csv(self.threshold_trials_path, index=False)
+        self.log.info("Results saved to %s", self.threshold_trials_path)
+
+        n_candidates = results_df.loc[results_df.f1.idxmax(), "num_candidates"]
+        self.log.info("Best num_candidates: %s", n_candidates)
+        self.num_candidates = n_candidates
+
+    @staticmethod
+    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
+        """No params, dummy function."""
+
+        def objective(trial: optuna.Trial):
+            return 0.0
+
+        return objective
