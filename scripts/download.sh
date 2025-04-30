@@ -30,6 +30,17 @@ if [ "$ITEM" == "HDFS" ]; then
     wget "https://zenodo.org/record/3227177/files/${zipfile}" -P "$parent_path"
     tar -xvzf "$zipfile" anomaly_label.csv
     rm "$zipfile"
+elif [ "$ITEM" == "HDFSLogHub" ]; then
+    parent_path="${DOWNLOAD_DIR}/${ITEM}/"
+    mkdir -p "$parent_path"
+    cd "$parent_path" || { echo "Failed to cd into $parent_path"; exit 1; }
+
+    # Download the dataset
+    zipfile="HDFS_1.tar.gz?download=1"
+    wget "https://zenodo.org/record/3227177/files/${zipfile}" -P "$parent_path"
+    tar -xvzf "$zipfile" anomaly_label.csv HDFS.log
+    mv HDFS.log HDFSLogHub.log
+    rm "$zipfile"
 elif [ "$ITEM" == "BGL" ]; then
     parent_path="${DOWNLOAD_DIR}/${ITEM}/"
     mkdir -p "$parent_path"

@@ -354,12 +354,11 @@ class HDFS(DataLoader):
         dataloader.parse_by_drain(core_jobs=NUM_PROCS)
 
         # Drop malformed template
-        m_id = None
+        drop_ids = {}
         for t_id, template in dataloader.templates.items():
             if template == "such file or directory":
-                m_id = t_id
+                drop_ids = {t_id}
                 break
-        drop_ids = {m_id}
 
         return preprocessor, dataloader, drop_ids
 
@@ -443,6 +442,14 @@ class HDFSFixed(HDFS):
 
         self.log.info("Post-merge: %s templates", len(dl.templates))
         return p, dl, d_ids
+
+
+class HDFSLogHub(HDFS):
+    log = get_logger("DataLoader.HDFSLogHub")
+
+    @skip_when_present(["dataset", "labels"])
+    def _get_dataset(self):
+        os.system(f"bash scripts/download.sh HDFSLogHub {self.config['dataset_dir']}")
 
 
 class BGLBase(DataLoader):
@@ -555,6 +562,7 @@ class TBird(DataLoader):
 dataloaders: Dict[str, Type[DataLoader]] = {
     "HDFS": HDFS,
     "HDFSFixed": HDFSFixed,
+    "HDFSLogHub": HDFSLogHub,
     "BGL40": BGL40,
     "BGL120": BGL120,
     "TBird": TBird,
