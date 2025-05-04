@@ -485,7 +485,6 @@ class BGLBase(DataLoader):
         dataloader = BGLLoader(
             paths=self.paths,
             semantic_repr_func=t_encoder.present,
-            group_component=False,
             win_kind="tumbling",
             **self.get_settings(),
         )
@@ -510,13 +509,19 @@ class BGLBase(DataLoader):
 class BGL40(BGLBase):
     @staticmethod
     def get_settings():
-        return {"win_secs": 60, "win_lines": 40}
+        return {"win_secs": 60, "win_lines": 40, "group_component": False}
 
 
 class BGL120(BGLBase):
     @staticmethod
     def get_settings():
-        return {"win_secs": 60, "win_lines": 120}
+        return {"win_secs": 60, "win_lines": 120, "group_component": False}
+
+
+class BGLComponent(BGLBase):
+    @staticmethod
+    def get_settings():
+        return {"win_secs": None, "win_lines": 120, "group_component": True}
 
 
 class TBird(DataLoader):
@@ -565,5 +570,6 @@ dataloaders: Dict[str, Type[DataLoader]] = {
     "HDFSLogHub": HDFSLogHub,
     "BGL40": BGL40,
     "BGL120": BGL120,
+    "BGLComponent": BGLComponent,
     "TBird": TBird,
 }
