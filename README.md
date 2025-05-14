@@ -82,6 +82,8 @@ To see all available options, use:
 python orchestrator.py --help
 ```
 
+The repository also contains all necessary scripts to run experiments on a PBS scheduled HPC cluster like the [MetaCentrum computing grid service](https://docs.metacentrum.cz/en/docs/welcome). The scripts are located in the `pbs` directory, and you can learn more about it [here](pbs/README.md).
+
 ## Visualize outputs
 
 Once the pipeline is finished, you can visualize the outputs of the methods using the `plot.py` script. This script will create plots of the results within the `outputs` directory and saves them alongside the results. The script expects the directories with outputs for a specific dataset as input. For example, to visualize the outputs of the `HDFS` dataset from the example above, use:
@@ -91,6 +93,8 @@ python plot.py outputs/HDFSShuffled_0.1
 ```
 
 This will generate plots for all methods evaluated with these settings. 
+
+There are also additional scripts that produce the figures used in the masters thesis. These scripts are located in the `plots` directory.
 
 ## Datasets
 
