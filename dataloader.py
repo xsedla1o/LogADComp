@@ -1,3 +1,9 @@
+"""
+DataLoader classes for all covered datasets.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import csv
 import gc
 import os
@@ -80,6 +86,16 @@ def cyclic_read(data: np.ndarray, samples: int, offset: int) -> Tuple[np.ndarray
 
 
 class DataLoader(ABC):
+    """
+    Base class for all data loaders.
+
+    Implements the higher level processing once the dataset is parsed.
+
+    The child class should implement the `_parse` method to parse the dataset,
+    and the `load_neurallog` method to load the NeuralLog representation.
+    It is also expected to extend the `get` method to download the dataset.
+    """
+
     log: Logger = None
 
     def __init__(self, config: dict, paths: DataPaths):
@@ -319,6 +335,10 @@ class DataLoader(ABC):
 
 
 class HDFS(DataLoader):
+    """
+    This class parses the Xu version of the HDFS dataset.
+    """
+
     log = get_logger("DataLoader.HDFS")
 
     def get(self):
@@ -376,8 +396,8 @@ class HDFS(DataLoader):
 
 class HDFSFixed(HDFS):
     """
-    This class parses the HDFS dataset, but merges all templates matching
-    `BLOCK* ask [IPANDPORT] to delete .*` into a single template.
+    This class parses the Xu version of the HDFS dataset, but merges all templates
+    matching `BLOCK* ask [IPANDPORT] to delete .*` into a single template.
     """
 
     log = get_logger("DataLoader.HDFSFixed")
@@ -445,6 +465,10 @@ class HDFSFixed(HDFS):
 
 
 class HDFSLogHub(HDFS):
+    """
+    This class parses the LogHub version of the HDFS dataset.
+    """
+
     log = get_logger("DataLoader.HDFSLogHub")
 
     @skip_when_present(["dataset", "labels"])
@@ -453,6 +477,10 @@ class HDFSLogHub(HDFS):
 
 
 class BGLBase(DataLoader):
+    """
+    Base class for all BGL grouping versions, implements downloading and parsing.
+    """
+
     log = get_logger("DataLoader.BGL")
 
     def __init__(self, config: dict, paths: DataPaths):
@@ -507,24 +535,41 @@ class BGLBase(DataLoader):
 
 
 class BGL40(BGLBase):
+    """
+    Parses the BGL dataset with 40 lines per window.
+    """
+
     @staticmethod
     def get_settings():
         return {"win_secs": 60, "win_lines": 40, "group_component": False}
 
 
 class BGL120(BGLBase):
+    """
+    Parses the BGL dataset with 120 lines per window.
+    """
+
     @staticmethod
     def get_settings():
         return {"win_secs": 60, "win_lines": 120, "group_component": False}
 
 
 class BGLComponent(BGLBase):
+    """
+    Parses the BGL dataset with 120 lines per window and groups by component (location).
+    """
+
     @staticmethod
     def get_settings():
         return {"win_secs": None, "win_lines": 120, "group_component": True}
 
 
 class TBird(DataLoader):
+    """
+    This class parses the Thunderbird dataset with 40 lines per fixed window.
+    Note that the framework uses a 20M sample of the dataset due to memory constraints.
+    """
+
     log = get_logger("DataLoader.TBird")
 
     def get(self):

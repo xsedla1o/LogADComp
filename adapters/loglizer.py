@@ -1,3 +1,7 @@
+"""
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 from typing import Tuple
 
 import optuna
@@ -9,6 +13,8 @@ from .base import LogADCompAdapter
 
 
 class SVMAdapter(LogADCompAdapter):
+    """Wrapper fror the loglizer SVM model, which is a wrapper for sklearn.LinearSVC."""
+
     def __init__(self):
         super().__init__()
         self._model = SVM()
@@ -63,6 +69,8 @@ class SVMAdapter(LogADCompAdapter):
 
 
 class LogClusterAdapter(LogADCompAdapter):
+    """Wrapper for the loglizer LogClustering model."""
+
     def __init__(self):
         super().__init__()
         self._model = LogClustering()

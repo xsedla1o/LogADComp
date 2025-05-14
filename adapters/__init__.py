@@ -1,3 +1,11 @@
+"""
+Provides a dictionary of model adapters for different log analysis methods.
+
+As multiple unrelated models are used, the adapters are loaded lazily to avoid unnecessary imports.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import sys
 from pathlib import Path
 from typing import Dict, Type

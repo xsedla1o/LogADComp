@@ -1,3 +1,7 @@
+"""
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import time
 from typing import Callable
 from typing import Optional, Tuple, List
@@ -36,6 +40,10 @@ class InstanceDataset(Dataset):
 
 
 class LogRobustAdapter(LogADCompAdapter):
+    """
+    Wrapper for the LogRobust model.
+    """
+
     def __init__(self):
         super().__init__()
         self.log = get_logger("LogRobustAdapter")
@@ -61,9 +69,6 @@ class LogRobustAdapter(LogADCompAdapter):
     def preprocess_split(
         self, x_train: np.ndarray, x_val: np.ndarray, x_test: np.ndarray
     ) -> tuple:
-        """
-        For LogRobust, the event indices are calculated using the training set
-        """
         return x_train, x_val, x_test
 
     def set_params(

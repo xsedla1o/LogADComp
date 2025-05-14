@@ -1,3 +1,7 @@
+"""
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import math
 from typing import Tuple
 from typing import Union
@@ -11,6 +15,10 @@ from .base import LogADCompAdapter
 
 
 class PCAAdapter(LogADCompAdapter):
+    """
+    PCAAdapter is a wrapper for the PCA model from SemPCA repository.
+    """
+
     def __init__(self):
         super().__init__()
         self._model = PCA()
@@ -68,6 +76,10 @@ class PCAAdapter(LogADCompAdapter):
 
 
 class SemPCAAdapter(PCAAdapter):
+    """
+    SemPCAAdapter is a wrapper for the PCAPlusPlus model from SemPCA repository.
+    """
+
     def __init__(self):
         super().__init__()
         self._model = PCAPlusPlus()

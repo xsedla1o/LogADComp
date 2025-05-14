@@ -1,3 +1,7 @@
+"""
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import os
 import sys
 from pathlib import Path
@@ -68,6 +72,10 @@ class BatchGenerator(Sequence):
 
 
 class NeuralLogAdapter(LogADCompAdapter):
+    """
+    NeuralLogAdapter is a wrapper for the NeuralLog model.
+    """
+
     def __init__(self):
         super().__init__()
         self._model: Model = None

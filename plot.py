@@ -1,3 +1,9 @@
+"""
+Script that visualizes the results of the models as box plots.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import argparse
 import os
 import os.path

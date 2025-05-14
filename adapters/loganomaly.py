@@ -1,3 +1,7 @@
+"""
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import time
 from typing import Callable
 from typing import Optional, List
@@ -16,13 +20,17 @@ from sempca.models import LogAnomaly
 from sempca.module import Optimizer, Vocab
 from sempca.utils import get_logger
 from sempca.utils import tqdm
-from utils import calculate_metrics, get_memory_usage
+from utils import get_memory_usage
 from utils import log_gpu_memory_usage
 from .base import ModelPaths
 from .sempca_lstm import SemPCALSTMAdapter
 
 
 class LogAnomalyAdapter(SemPCALSTMAdapter):
+    """
+    Wrapper for the LogAnomaly model.
+    """
+
     def __init__(self, window=10):
         super().__init__(window)
         self.log = get_logger("LogAnomalyAdapter")

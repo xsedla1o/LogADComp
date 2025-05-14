@@ -1,3 +1,7 @@
+"""
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import time
 from typing import Callable
 from typing import Optional, Tuple, List
@@ -19,6 +23,10 @@ from .sempca_lstm import SemPCALSTMAdapter
 
 
 class DeepLogAdapter(SemPCALSTMAdapter):
+    """
+    Wrapper for the DeepLog model.
+    """
+
     def __init__(self, window=10, in_size=1):
         super().__init__(window)
         self.log = get_logger("DeepLogAdapter")

@@ -1,3 +1,9 @@
+"""
+Various utility functions for the project.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import os
 import random
 from time import time
@@ -129,16 +135,14 @@ def log_gpu_memory_usage(logger):
 
 def calculate_metrics(y_true, y_pred) -> Dict[str, Union[int, float]]:
     """
-    Calculate evaluation metrics dictionary for precision, recall, f1, tnr, and acc.
+    Calculate evaluation metrics for precision, recall, f1, TNR, and accuracy.
 
-    Parameters
-    ----------
-        y_pred: ndarry, the predicted result list
-        y_true: ndarray, the ground truth label list
+    Args:
+        y_pred (ndarray): The predicted result list.
+        y_true (ndarray): The ground truth label list.
 
-    Returns
-    -------
-        dict: dictionary containing evaluation metrics
+    Returns:
+        Dict[str, Union[int, float]]: A dictionary containing evaluation metrics.
     """
     y_true = np.array(y_true, copy=False)
     y_pred = np.array(y_pred, copy=False)

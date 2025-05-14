@@ -1,3 +1,7 @@
+"""
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import json
 import os
 import sys
@@ -39,6 +43,10 @@ CACHED_PATH_KEYS = CACHED_DATASET_KEYS + ["vocab_path"]
 
 
 class LogBERTAdapter(LogADCompAdapter):
+    """
+    Wrapper for the LogBERT model.
+    """
+
     def __init__(self):
         super().__init__()
         self.log = get_logger("LogBERTAdapter")
@@ -174,7 +182,8 @@ class LogBERTAdapter(LogADCompAdapter):
         return objective
 
     def find_thresholds(self, x_norm, y_true, n_trials=20, max_threshold=0.3):
-        """Tune hyperparameters of anomaly detection logic.
+        """
+        Tune hyperparameters of anomaly detection logic.
         - num_candidates: number of candidates to consider for anomaly detection
         - threshold: threshold of missed predictions to trigger anomaly
         """
@@ -320,7 +329,8 @@ class LogBERTAdapter(LogADCompAdapter):
 
     @staticmethod
     def _get_raw_outputs(p: Predictor, model: BERTLog, data_loader: TorchDataLoader):
-        """Only get the model outputs without any post-processing.
+        """
+        Only get the model outputs without any post-processing.
 
         Meant for usage in optimize_hyperparameters to avoid re-computing the model outputs.
         """
@@ -458,19 +468,21 @@ class LogBERTAdapter(LogADCompAdapter):
         sequences, window_size, adaptive_window, seq_len, min_len
     ) -> Tuple[NdArr, NdArr, NdArr, List[int]]:
         """
-        Generate log_seqs and tim_seqs directly from a list of instances without
+        Generate `log_seqs` and `tim_seqs` directly from a list of instances without
         converting the sequences to a string.
 
-        Each instance is expected to have a 'sequence' attribute that is a list of tokens.
-        Tokens should be either a single value (log key) or a two-element structure [log_key, timestamp].
+        Each instance is expected to have a `sequence` attribute that is a list of tokens.
+        Tokens should be either a single value (log key) or a two-element structure `[log_key, timestamp]`.
 
-        :param sequences: List of sequences.
-        :param window_size: Window size for segmentation.
-        :param adaptive_window: Boolean flag for adaptive windowing.
-        :param seq_len: Maximum number of tokens per session.
-        :param scale: Optional scaler for time sequences (if needed).
-        :param min_len: Minimum sequence length required.
-        :return: Tuple (log_seqs, tim_seqs) sorted by descending sequence length.
+        Args:
+            sequences (List): List of sequences.
+            window_size (int): Window size for segmentation.
+            adaptive_window (bool): Boolean flag for adaptive windowing.
+            seq_len (int): Maximum number of tokens per session.
+            min_len (int): Minimum sequence length required.
+
+        Returns:
+            Tuple: A tuple containing `log_seqs` and `tim_seqs` sorted by descending sequence length.
         """
         log_seqs = []
         tim_seqs = []

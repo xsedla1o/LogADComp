@@ -1,10 +1,18 @@
+"""
+The interface definition for all the adapter classes.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 import os
 import shutil
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Callable
 from typing import Union
+
+import optuna
 
 from dataloader import NdArr, DataLoader
 
@@ -13,6 +21,8 @@ from dataloader import NdArr, DataLoader
 class ModelPaths:
     """
     ModelPaths is a dataclass that contains all the paths to the files and directories
+
+    Used to specify the paths to the cache and artefacts directories for the model.
     """
 
     cache: Union[Path, str]
@@ -52,6 +62,14 @@ class ModelPaths:
 
 
 class LogADCompAdapter(ABC):
+    """
+    Base class for all the adapters.
+
+    An adapter is a wrapper around a model that allows for easy integration with the
+    LogADComp pipeline. It provides a common interface for all the models and handles
+    the data loading, preprocessing, and training.
+    """
+
     def __init__(self):
         self._model = None
 
@@ -73,7 +91,9 @@ class LogADCompAdapter(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
+    def get_trial_objective(
+        x_train, y_train, x_val, y_val, prev_params: dict = None
+    ) -> Callable[[optuna.Trial], float]:
         """Optuna objective function to optimize hyperparameters"""
 
     @abstractmethod
@@ -81,15 +101,19 @@ class LogADCompAdapter(ABC):
         """Set the current wrapped model's hyperparameters"""
 
     @abstractmethod
-    def fit(self, x_train, y_train, x_val, y_val):
+    def fit(self, x_train: NdArr, y_train: NdArr, x_val: NdArr, y_val: NdArr):
         """Fit the model on the training data, allowing for validation"""
 
-    def predict(self, x_test):
+    def predict(self, x_test: NdArr) -> NdArr:
         """Predict on the test data"""
         return self._model.predict(x_test)
 
 
 class DualTrialAdapter(LogADCompAdapter):
+    """
+    Base class for all the adapters a dual trial to optimize hyperparameters.
+    """
+
     @staticmethod
     @abstractmethod
     def get_training_trial_objective(x_train, y_train, x_val, y_val):

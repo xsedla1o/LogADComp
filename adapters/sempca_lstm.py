@@ -1,3 +1,9 @@
+"""
+An abstract base adapter class extracting common code SemPCA-LSTM models.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 from abc import ABC
 from typing import Tuple, List
 
@@ -21,15 +27,19 @@ class SemPCALSTMAdapter(DualTrialAdapter, ABC):
         self.window = window
 
     def set_paths(self, paths: ModelPaths):
-        """Set the paths for the LogBERT adapter."""
+        """Set the paths for the adapter."""
         self.threshold_trials_path = paths.artefacts / "training_trial_results.csv"
 
     def get_event2index(self, x_train, x_test):
         """
         Calculate unique events in pre & post for event count vector calculation.
-        :param x_train: pre data, including training set and validation set(if has)
-        :param x_test: post data, mostly testing set
-        :return: mappings
+
+        Args:
+            x_train (list): Pre data, including training set and validation set (if any).
+            x_test (list): Post data, mostly testing set.
+
+        Returns:
+            tuple: Mappings for train and test events.
         """
         self.log.info("Getting train instances' event-idx mapping.")
 

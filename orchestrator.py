@@ -1,3 +1,17 @@
+"""
+Orchestrator for the LogADComp pipeline.
+
+This script is responsible for orchestrating the entire LogADComp pipeline,
+including data loading, preprocessing, hyperparameter tuning, and evaluation.
+
+It uses Optuna for hyperparameter optimization and supports multiple datasets
+and models.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+
+See README.md for instructions and script help for usage.
+"""
+
 import argparse
 import gc
 import json
@@ -212,6 +226,7 @@ if __name__ == "__main__":
     print(m_paths)
     print(f"Base usage {get_memory_usage()}")
 
+    # Download and extract the dataset if not already done
     dataloader = dataloaders[d_name](config_dict, paths)
     dataloader.get()
 
@@ -219,9 +234,11 @@ if __name__ == "__main__":
 
     path_manager = ModelPathsManager(base=m_paths, target=model)
 
+    # Transform the representation to match the model
     xs, ys = model.transform_representation(dataloader)
     print(f"Transformed usage {get_memory_usage()}")
 
+    # Perform training hyperparameter tuning if needed
     if exists_and_not_empty(config_dict["train_hyperparameters"]):
         print("Found train hyperparameters")
         with open(config_dict["train_hyperparameters"], "r") as in_f:
@@ -280,6 +297,7 @@ if __name__ == "__main__":
     print("Best train params", best_train_params)
     print(f"Post train params usage {get_memory_usage()}")
 
+    # Hyperparameter tuning
     if all(
         exists_and_not_empty(config_dict[x])
         for x in ["trials_output", "hyperparameters"]
@@ -338,7 +356,7 @@ if __name__ == "__main__":
     print("Best params", best_params)
     print(f"Post params usage {get_memory_usage()}")
 
-    # Float offsets from 0.0 to 0.9 in steps of 0.1
+    # Evaluate the model - 10-fold cross-validation
     for offset in path_manager.with_splits(split_offsets):
         offset /= 10
 

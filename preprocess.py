@@ -1,3 +1,12 @@
+"""
+Preprocessing classes for PCA, SVM and LogCluster models.
+
+This file is based on the original code from the Loglizer project,
+`loglizer.preprocessing.FeatureExtractor` class.
+
+Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
+"""
+
 from collections import Counter
 
 import numpy as np
@@ -9,31 +18,33 @@ from sempca.utils import get_logger
 
 
 class EventCounter(BaseEstimator, TransformerMixin):
+    """
+    Extracts event counts from log sequences.
+    """
     logger = get_logger("EventCountVectorExtractor", "StaticLogger.log")
 
     def __init__(self, oov=False, min_count=1):
         """
         Perform event counting on log sequences to produce event count vectors.
 
-        Parameters
-        ----------
-            oov: bool, whether to use OOV event
-            min_count: int, the minimal occurrence of events (default 0), only valid when oov=True.
+        Args:
+            oov (bool): Whether to use out-of-vocabulary (OOV) events.
+            min_count (int): The minimal occurrence of events. Only valid when `oov` is True. Defaults to 1.
         """
         self.events = None
         self.oov = oov
         self.min_count = min_count
 
-    def fit(self, X, y=None):
-        """Fit and transform the data matrix
+    def fit(self, X: np.ndarray, y=None):
+        """
+        Fits the EventCounter on the data matrix.
 
-        Arguments
-        ---------
-            X: ndarray, log sequences matrix
+        Args:
+            X (ndarray): Log sequences matrix.
+            y (None, optional): Ignored. Defaults to None.
 
-        Returns
-        -------
-            X_new: The transformed data matrix
+        Returns:
+            EventCounter: The fitted instance.
         """
         X_counts = [Counter(seq) for seq in X]
         X_df = pd.DataFrame(X_counts).fillna(0)
@@ -50,16 +61,16 @@ class EventCounter(BaseEstimator, TransformerMixin):
         self.fitted_ = True  # Make sklearn happy
         return self
 
-    def transform(self, X, y=None):
-        """Transform the data matrix with trained parameters
+    def transform(self, X: np.ndarray, y=None):
+        """
+        Transforms the data matrix with trained parameters.
 
-        Arguments
-        ---------
-            X: log sequences matrix
+        Args:
+            X (ndarray): Log sequences matrix.
+            y (None, optional): Ignored. Defaults to None.
 
-        Returns
-        -------
-            X_new: The transformed data matrix
+        Returns:
+            ndarray: The transformed data matrix.
         """
         self.logger.debug("====== Transformed test data summary ======")
 
@@ -86,27 +97,34 @@ class EventCounter(BaseEstimator, TransformerMixin):
 
 
 class Normalizer(BaseEstimator, TransformerMixin):
+    """
+    Enables term weighting and normalization of log sequences.
+    """
     logger = get_logger("Normalizer", "StaticLogger.log")
 
     def __init__(self, term_weighting=None, normalization=None):
         """
-        Parameters
-        ----------
-            term_weighting: None or 'tf-idf'
-            normalization: None, 'zero-mean', or 'sigmoid'
+        Initializes the Normalizer.
+
+        Args:
+            term_weighting (str, optional): Term weighting method. Can be 'tf-idf' or None. Defaults to None.
+            normalization (str, optional): Normalization method. Can be 'zero-mean', 'sigmoid', or None. Defaults to None.
         """
         self.idf_vec = None
         self.mean_vec = None
         self.term_weighting = term_weighting
         self.normalization = normalization
 
-    def fit(self, X, y=None):
-        """Fit the normalizer on the training data and store parameters.
+    def fit(self, X: np.ndarray, y=None):
+        """
+        Fits the Normalizer on the training data and stores parameters.
 
-        Arguments
-        ---------
-            X: ndarray, log sequences matrix
+        Args:
+            X (ndarray): Log sequences matrix.
+            y (None, optional): Ignored. Defaults to None.
 
+        Returns:
+            Normalizer: The fitted instance.
         """
         self.logger.debug("====== Fitting normalization on train data ======")
 
@@ -127,16 +145,16 @@ class Normalizer(BaseEstimator, TransformerMixin):
         self.fitted_ = True  # Make sklearn happy
         return self
 
-    def transform(self, X, y=None):
-        """Transform the data matrix with trained parameters
+    def transform(self, X: np.ndarray, y=None):
+        """
+        Transforms the data matrix with trained parameters.
 
-        Arguments
-        ---------
-            X: log sequences matrix
+        Args:
+            X (ndarray): Log sequences matrix.
+            y (None, optional): Ignored. Defaults to None.
 
-        Returns
-        -------
-            X_new: The transformed data matrix
+        Returns:
+            ndarray: The transformed data matrix.
         """
         self.logger.debug("====== Normalizing data ======")
 
