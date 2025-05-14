@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from collections import defaultdict
+from itertools import chain
 from pathlib import Path
 from typing import Optional, Tuple, List, Iterable
 
@@ -181,6 +182,38 @@ class LogBERTAdapter(LogADCompAdapter):
         vocab = WordVocab.load_vocab(p.vocab_path)
         dl, *reassembly_context = self._prepare_sequences(x_norm, p, vocab)
 
+        if self.vocab_size < 256:
+            results_df = self._find_thresholds_small(
+                y_true,
+                p,
+                model,
+                dl,
+                reassembly_context,
+                n_trials=n_trials,
+                max_threshold=max_threshold,
+            )
+        else:
+            self.log.debug("Finding thresholds for large vocab size")
+            results_df = self.find_thresholds_large(
+                y_true,
+                p,
+                model,
+                dl,
+                reassembly_context,
+                n_trials=n_trials,
+                max_threshold=max_threshold,
+            )
+        results_df.to_csv(self.threshold_trials_path, index=False)
+        self.log.info("Results saved to %s", self.threshold_trials_path)
+        best_params = dict(
+            results_df.loc[results_df.f1.idxmax(), ["num_candidates", "threshold"]]
+        )
+        self.log.info("Best params: %s", best_params)
+        return best_params
+
+    def _find_thresholds_small(
+        self, y_true, p, model, dl, reassembly_context, n_trials=20, max_threshold=0.3
+    ):
         with torch.no_grad():
             inputs, outputs = self._get_raw_outputs(p, model, dl)
 
@@ -215,13 +248,75 @@ class LogBERTAdapter(LogADCompAdapter):
         )
         study.optimize(objective, n_trials=n_trials)
         results_df = pd.DataFrame(trial_results)
-        results_df.to_csv(self.threshold_trials_path, index=False)
-        self.log.info("Results saved to %s", self.threshold_trials_path)
-        best_params = dict(
-            results_df.loc[results_df.f1.idxmax(), ["num_candidates", "threshold"]]
+        return results_df
+
+    @staticmethod
+    def compute_anomaly_bool_threshold_range(results, params, max_threshold):
+        is_logkey = params["is_logkey"]
+        is_time = params["is_time"]
+        detection_results = [[] for _ in range(1, int(max_threshold * 100))]
+        for seq_res_gen in results:
+            for seq_res in seq_res_gen:
+                for thresh in range(0, int(max_threshold * 100) - 1):
+                    threshold = thresh / 100
+                    detection_results[thresh].append(
+                        (
+                            is_logkey
+                            and seq_res["undetected_tokens"]
+                            > seq_res["masked_tokens"] * threshold
+                        )
+                        or (
+                            is_time
+                            and seq_res["num_error"]
+                            > seq_res["masked_tokens"] * threshold
+                        )
+                        or (
+                            params["hypersphere_loss_test"]
+                            and seq_res["deepSVDD_label"]
+                        )
+                    )
+        return [np.asarray(res, dtype=bool) for res in detection_results]
+
+    def find_thresholds_large(
+        self, y_true, p, model, dl, reassembly_context, n_trials=20, max_threshold=0.3
+    ):
+        trial_results = []
+
+        def objective(trial: optuna.Trial):
+            n_candidates = trial.suggest_int("num_candidates", 1, self.vocab_size)
+            tmp_candidates = p.num_candidates
+            p.num_candidates = n_candidates
+
+            with torch.no_grad():
+                results = self._predict_helper_iter(p, model, dl)
+                sample_pred_ys = self.compute_anomaly_bool_threshold_range(
+                    results, p.get_params(), max_threshold
+                )
+
+            max_F1 = 0
+            for sample_pred_y, int_thr in zip(
+                sample_pred_ys, range(1, int(max_threshold * 100))
+            ):
+                threshold = int_thr / 100
+                seq_pred_y = self._reassemble_predictions(
+                    sample_pred_y, *reassembly_context
+                )
+
+                metrics = calculate_metrics(y_true, seq_pred_y)
+                trial_results.append(
+                    {"num_candidates": n_candidates, "threshold": threshold} | metrics
+                )
+                max_F1 = max(max_F1, metrics["f1"])
+
+            p.num_candidates = tmp_candidates
+            return max_F1
+
+        study = optuna.create_study(
+            study_name="LogBERT_optimization", direction="maximize"
         )
-        self.log.info("Best params: %s", best_params)
-        return best_params
+        study.optimize(objective, n_trials=n_trials)
+        results_df = pd.DataFrame(trial_results)
+        return results_df
 
     @staticmethod
     def _get_raw_outputs(p: Predictor, model: BERTLog, data_loader: TorchDataLoader):
@@ -349,13 +444,11 @@ class LogBERTAdapter(LogADCompAdapter):
             test_dl, *reassembly_context = self._prepare_sequences(x_test, p, vocab)
 
             with Timed("Running model to get anomaly scores"):
-                test_normal_results, test_normal_errors = self._predict_helper(
-                    p, model, test_dl
-                )
+                test_results = self._predict_helper_iter(p, model, test_dl)
 
             with Timed("Detecting anomalies based on threshold"):
                 sample_y_pred = compute_anomaly_bool(
-                    test_normal_results, p.get_params(), self.threshold
+                    chain.from_iterable(test_results), p.get_params(), self.threshold
                 )
 
             return self._reassemble_predictions(sample_y_pred, *reassembly_context)
@@ -522,6 +615,19 @@ class LogBERTAdapter(LogADCompAdapter):
 
         # for hypersphere distance
         return total_results, output_cls
+
+    def _predict_helper_iter(
+        self, p: Predictor, model: BERTLog, data_loader: TorchDataLoader
+    ):
+        for idx, data in enumerate(tqdm(data_loader, desc="Predicting")):
+            data = {key: value.to(p.device) for key, value in data.items()}
+            result = model(data["bert_input"], data["time_input"])
+
+            results = self._post_model_process_batch(
+                p, data, result["logkey_output"], result["cls_output"]
+            )
+
+            yield results
 
     def _post_model_process_batch(
         self,
