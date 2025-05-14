@@ -1,4 +1,5 @@
 import argparse
+import os
 import os.path
 from typing import Dict, List
 
@@ -8,6 +9,12 @@ import pandas as pd
 
 def load_model_dfs(model_output_dir):
     model_dfs = []
+    if not os.path.exists(model_output_dir):
+        print(f"Directory {model_output_dir} does not exist")
+        return None
+    if not list(n for n in os.listdir(model_output_dir) if n.startswith("metrics")):
+        print(f"Directory {model_output_dir} does not contain metrics files")
+        return None
     for i in range(10):
         offset = i / 10
         metrics_path = f"{model_output_dir}/metrics_{offset}.csv"
@@ -107,11 +114,37 @@ def plot_all(output_dir, models, verbose=False):
                 print(data)
                 print(data.describe().drop("count"))
 
+    if not plot_data:
+        print(f"No data found for {output_dir}")
+        return
+
     fig, ax = plt.subplots(figsize=(2 + 1.1 * len(plot_data), 5))
     ax.set_ylabel("F1-score")
     ax.set_ylim(0, 1)
-    ax.boxplot(plot_data.values(), tick_labels=plot_data.keys())
-    plt.savefig(f"{output_dir}/f1.png", bbox_inches="tight")
+    try:
+        ax.boxplot(plot_data.values(), tick_labels=plot_data.keys())
+        plt.savefig(f"{output_dir}/f1.png", bbox_inches="tight")
+    except ValueError as e:
+        print(f"Error plotting boxplot for {output_dir}: {e}")
+    plt.close()
+
+    # Save mean and median values to CSV
+    mean_data = pd.DataFrame(plot_data).mean(axis=0)
+    median_data = pd.DataFrame(plot_data).median(axis=0)
+    csv_df = pd.concat([mean_data, median_data], axis=1)
+    csv_df.columns = ["mean", "median"]
+    csv_df.to_csv(f"{output_dir}/mean_med_f1.csv", index=True)
+
+    # Plot a mean of all models per split
+    mean_data = pd.DataFrame(plot_data).mean(axis=1)
+    fig, ax = plt.subplots(figsize=(5, 4))
+    ax.set_xlabel("Split")
+    ax.set_ylabel("F1-score")
+    ax.set_ylim(0, 1)
+    ax.plot(mean_data.index, mean_data.values, label="Mean")
+    ax.set_xticks(mean_data.index)
+
+    plt.savefig(f"{output_dir}/mean_f1.pdf", bbox_inches="tight", dpi=300)
     plt.close()
 
 
