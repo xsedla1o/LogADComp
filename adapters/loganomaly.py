@@ -54,14 +54,23 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
             x_val, self.vocab.PAD, normal_only=True
         )
 
+        batch_sizes = [128, 512, 1024, 2048]
+        if self.num_classes > 512:
+            batch_sizes.pop()
+        if self.num_classes > 1024:
+            batch_sizes.pop()
+        if self.num_classes > 2048:
+            batch_sizes.pop()
+        self.log.debug(
+            "N classes: %d, selecting batch size from %s", self.num_classes, batch_sizes
+        )
+
         def objective(trial: optuna.Trial):
             """Return the validation loss for a given set of hyperparameters."""
             hidden_size = trial.suggest_categorical("hidden_size", [128])
             _num_layers = trial.suggest_categorical("num_layers", [2])
             self.epochs = trial.suggest_categorical("epochs", [10, 5])
-            self.batch_size = trial.suggest_categorical(
-                "batch_size", [128, 512, 1024, 2048]
-            )
+            self.batch_size = trial.suggest_categorical("batch_size", batch_sizes)
             self.learning_rate = trial.suggest_categorical(
                 "learning_rate", [2e-3, 1e-3, 5e-4]
             )
@@ -82,10 +91,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 train_set,
                 val_set,
                 run_suffix=f"trial_{trial.number}",
-                callbacks=[
-                    show_memory_usage,
-                    lambda _, _b: log_gpu_memory_usage(self.log),
-                ],
+                callbacks=[show_memory_usage],
             )
             val_loss = self.get_val_loss(model, val_loader)
             return val_loss
