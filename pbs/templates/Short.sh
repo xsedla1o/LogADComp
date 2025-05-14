@@ -15,6 +15,6 @@ rsync -avu $SCRATCHDIR/datasets/ $HOMEDIR/datasets/
 rsync -avu $SCRATCHDIR/outputs/ $HOMEDIR/outputs/
 rsync -avu $SCRATCHDIR/artefacts/ $HOMEDIR/artefacts/
 
-$HOMEDIR/notify.sh python $SCRATCHDIR/logadcomp/orchestrator.py \
+python $SCRATCHDIR/logadcomp/orchestrator.py \
   $DATASET LogCluster --n_trials 50 \
   $OPTS
