@@ -94,7 +94,7 @@ python plot.py outputs/HDFSShuffled_0.1
 
 This will generate plots for all methods evaluated with these settings. 
 
-There are also additional scripts that produce the figures used in the masters thesis. These scripts are located in the `plots` directory.
+There are also additional scripts that produce the figures used in the masters thesis. These scripts are located in the `plots` directory and are further described [here](plots/README.md).
 
 ## Datasets
 
