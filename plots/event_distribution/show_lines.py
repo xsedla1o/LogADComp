@@ -38,17 +38,16 @@ def get_split_sums(ec_split: pd.DataFrame, i: int) -> pd.DataFrame:
 
 def plot_event_lines(val_df: pd.DataFrame, out_path: Union[Path, str]):
     nonempty = (val_df != 0).any(axis=0)
-    val_df = val_df.loc[:, nonempty]
-
     tiny = val_df.abs().sum(axis=0) < 0.01
-    val_df = val_df.loc[:, ~tiny]
-
     small = val_df.max(axis=0) < 0.95
-    val_df = val_df.loc[:, ~small]
 
-    # print(val_df)
+    unused = val_df.loc[:, tiny | small]
+    val_df = val_df.loc[:, nonempty & ~tiny & ~small]
 
     fig, ax = plt.subplots(figsize=tuple(map(lambda x: x * 0.95, (6, 4))))
+    for idx, column in enumerate(unused.columns):
+        unused[column].plot(ax=ax, color="gray", alpha=0.1, label="_nolegend_")
+
     colormap = plt.colormaps.get_cmap("tab10")
     for idx, column in enumerate(val_df.columns):
         val_df[column].plot(ax=ax, color=colormap(idx), label=column)
