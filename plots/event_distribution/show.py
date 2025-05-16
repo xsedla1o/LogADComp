@@ -30,7 +30,7 @@ def plot_anomaly_event_distribution(
     """
     vmin = min(event_counts_normal.min().min(), event_counts_anomaly.min().min())
     vmax = max(event_counts_normal.max().max(), event_counts_anomaly.max().max())
-    vmin = max(0.01, vmin)
+    vmin = max(1, vmin)
     norm = LogNorm(vmin=vmin, vmax=vmax)
 
     fig = plt.figure(figsize=(9, 6.5))
