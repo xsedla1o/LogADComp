@@ -141,10 +141,10 @@ def plot_all(output_dir, models, verbose=False):
     csv_df.columns = ["mean", "median"]
     csv_df.to_csv(f"{output_dir}/mean_med_f1.csv", index=True)
 
-    # Plot a mean of all models per split
+    # Plot a mean of all models per fold (cross-validation iteration)
     mean_data = pd.DataFrame(plot_data).mean(axis=1)
-    fig, ax = plt.subplots(figsize=(5, 4))
-    ax.set_xlabel("Split")
+    fig, ax = plt.subplots(figsize=tuple(map(lambda x: x * 0.95, (5, 4))))
+    ax.set_xlabel("Fold (CV iteration)")
     ax.set_ylabel("F1-score")
     ax.set_ylim(0, 1)
     ax.plot(mean_data.index, mean_data.values, label="Mean")

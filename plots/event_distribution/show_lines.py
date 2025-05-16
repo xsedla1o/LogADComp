@@ -48,11 +48,12 @@ def plot_event_lines(val_df: pd.DataFrame, out_path: Union[Path, str]):
 
     # print(val_df)
 
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=tuple(map(lambda x: x * 0.95, (6, 4))))
     colormap = plt.colormaps.get_cmap("tab10")
     for idx, column in enumerate(val_df.columns):
         val_df[column].plot(ax=ax, color=colormap(idx), label=column)
-    ax.set_xlabel("Split")
+
+    ax.set_xlabel("Fold (CV iteration)")
     ax.set_xticks(range(10))
     ax.set_ylabel("Difference in Normalized Event Counts")
     ax.legend(title="Event", bbox_to_anchor=(1.02, 1), loc="upper left")

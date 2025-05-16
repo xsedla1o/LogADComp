@@ -30,7 +30,7 @@ if __name__ == "__main__":
         hist = hist["0"]
         hists[data_dir.name] = hist
 
-        plt.figure(figsize=(5, 4))
+        plt.figure(figsize=tuple(map(lambda x: x * 0.95, (5, 4))))
         plt.bar(
             hist.index.astype(int),
             hist.values,
@@ -38,8 +38,8 @@ if __name__ == "__main__":
             alpha=0.7,
             edgecolor="black",
         )
-        plt.title("Anomalies Per Session")
-        plt.xlabel("Anomalies")
+        plt.title("Anomalous Lines Per Anomalous Session")
+        plt.xlabel("Anomalous Lines")
         plt.ylabel("Frequency")
         plt.grid(axis="y", alpha=0.75)
 

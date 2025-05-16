@@ -40,7 +40,7 @@ def plot_anomaly_event_distribution(
     )
     ax1.set_title("Normal Sessions")
     ax1.set_xlabel("Events")
-    ax1.set_ylabel("Split")
+    ax1.set_ylabel("Data Segments")
     if event_counts_normal.shape[1] < 100:
         ax1.set_yticks(range(event_counts_normal.shape[0]))
         ax1.set_xticks(range(event_counts_normal.shape[1]))
@@ -49,7 +49,7 @@ def plot_anomaly_event_distribution(
     ax2.imshow(event_counts_anomaly, cmap="plasma", interpolation="nearest", norm=norm)
     ax2.set_title("Anomalous Sessions")
     ax2.set_xlabel("Events")
-    ax2.set_ylabel("Split")
+    ax2.set_ylabel("Data Segments")
     if event_counts_normal.shape[1] < 100:
         ax2.set_yticks(range(event_counts_anomaly.shape[0]))
         ax2.set_xticks(range(event_counts_anomaly.shape[1]))
