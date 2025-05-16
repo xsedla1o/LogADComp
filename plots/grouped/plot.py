@@ -58,23 +58,29 @@ def plot_grouped_f1_boxplot(
     datasets: Dict[str, str],
     model_names: list[str],
     order_by_median: bool = False,
+    legend_loc: str = "lower left",
 ):
     """
     Plots a grouped boxplot of test-split F1 scores for multiple classifiers across multiple datasets.
 
-    Parameters
-    ----------
-    base_output_dir : str
-        Root directory containing one subfolder per dataset.
-    out_path : str or Path
-        Path to save the output plot.
-    datasets : mapping of str to str
-        Dataset labels and their corresponding subfolder names.
-    model_names : list of str
-        Names of the model subfolders under each dataset folder.
-    order_by_median : bool, default=False
-        If True, orders classifiers left→right by their overall median F1.
+    Args:
+        base_output_dir (str):
+            Root directory containing one subfolder per dataset.
+        out_path (str or Path):
+            Path to save the output plot.
+        datasets (Mapping[str, str]):
+            Mapping of dataset labels to their corresponding subfolder names.
+        model_names (List[str]):
+            List of model subfolder names under each dataset folder.
+        order_by_median (bool, optional):
+            If True, orders classifiers left→right by their overall median F1.
+            Defaults to False.
+        legend_loc (str, optional):
+            Location of the legend on the plot.
+            Defaults to "lower left".
 
+    Returns:
+        None
     """
     records = []
     # Collect all (dataset, classifier, f1) triples
@@ -132,7 +138,7 @@ def plot_grouped_f1_boxplot(
     ax.set_ylim(0, 1.05)
     # plt.xticks()
     plt.yticks([0, 0.2, 0.4, 0.6, 0.8, 1])
-    ax.legend(title="Dataset", loc="lower left")
+    ax.legend(title="Dataset", loc=legend_loc)
     plt.tight_layout()
 
     # Save and close
@@ -181,6 +187,7 @@ plot_grouped_f1_boxplot(
     datasets=datasets,
     model_names=classifiers,
     order_by_median=False,
+    legend_loc="lower right"
 )
 
 # BGL case study: train ratio
@@ -195,13 +202,14 @@ plot_grouped_f1_boxplot(
     datasets=datasets,
     model_names=classifiers,
     order_by_median=False,
+    legend_loc="upper right"
 )
 
 # HDFS case study: Preprocessing
 datasets = {
-    "HDFS LogHub": "HDFSLogHubShuffled_0.5",
-    "HDFS Fixed": "HDFSFixedShuffled_0.5",
     "HDFS Xu": "HDFSShuffled_0.5",
+    "HDFS Fixed": "HDFSFixedShuffled_0.5",
+    "HDFS LogHub": "HDFSLogHubShuffled_0.5",
 }
 plot_grouped_f1_boxplot(
     base_output_dir=base_dir,
