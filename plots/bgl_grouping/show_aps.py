@@ -38,7 +38,7 @@ if __name__ == "__main__":
             alpha=0.7,
             edgecolor="black",
         )
-        plt.title("Anomalous Lines Per Anomalous Session")
+        plt.title("Anomalous Lines Per Anomalous Sequence")
         plt.xlabel("Anomalous Lines")
         plt.ylabel("Frequency")
         plt.grid(axis="y", alpha=0.75)

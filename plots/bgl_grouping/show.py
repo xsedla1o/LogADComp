@@ -92,11 +92,11 @@ if __name__ == "__main__":
         # Draw heatmap
         fig, axs = plt.subplots(1, 3, figsize=(10, 4), sharey=True)
 
-        axs[0].set_title("All Sessions")
+        axs[0].set_title("All Sequences")
         im = plot_session_length(axs[0], hist_all, norm)
-        axs[1].set_title("Normal Sessions")
+        axs[1].set_title("Normal Sequences")
         plot_session_length(axs[1], hist_normal, norm, labely=False)
-        axs[2].set_title("Anomaly Sessions")
+        axs[2].set_title("Anomalous Sequences")
         plot_session_length(axs[2], hist_anomaly, norm, labely=False)
         fig.colorbar(im, ax=axs, orientation="vertical", fraction=0.02, pad=0.04)
 
@@ -106,7 +106,7 @@ if __name__ == "__main__":
         # Draw only all sessions histogram
         data = hist_all.T
         fig, ax = plt.subplots(figsize=(data.shape[1] * 1.5, 4))
-        ax.set_title("All Sessions")
+        ax.set_title("All Sequences")
         ax.set_xlabel("Time")
         ax.set_ylabel("Lines")
         ax.set_xticks(range(data.shape[1]))

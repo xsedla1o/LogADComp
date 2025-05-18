@@ -38,7 +38,7 @@ def plot_anomaly_event_distribution(
     im1 = ax1.imshow(
         event_counts_normal, cmap="plasma", interpolation="nearest", norm=norm
     )
-    ax1.set_title("Normal Sessions")
+    ax1.set_title("Normal Sequences")
     ax1.set_xlabel("Events")
     ax1.set_ylabel("Data Segments")
     if event_counts_normal.shape[1] < 100:
@@ -47,7 +47,7 @@ def plot_anomaly_event_distribution(
 
     ax2 = fig.add_subplot(212)
     ax2.imshow(event_counts_anomaly, cmap="plasma", interpolation="nearest", norm=norm)
-    ax2.set_title("Anomalous Sessions")
+    ax2.set_title("Anomalous Sequences")
     ax2.set_xlabel("Events")
     ax2.set_ylabel("Data Segments")
     if event_counts_normal.shape[1] < 100:
