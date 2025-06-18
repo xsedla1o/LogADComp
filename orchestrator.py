@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Generator
 
+import numpy as np
 import optuna
 import pandas as pd
 import tomli
@@ -141,6 +142,18 @@ if __name__ == "__main__":
         "--shuffle",
         action="store_true",
         help="Shuffle the dataset before splitting",
+        default=False,
+    )
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        help="Save model predictions as artefacts",
+        default=False,
+    )
+    parser.add_argument(
+        "--ignore-cache", "-i",
+        action="store_true",
+        help="Ignore the cache when evaluating methods",
         default=False,
     )
     args = parser.parse_args()
@@ -361,8 +374,9 @@ if __name__ == "__main__":
         offset /= 10
 
         if exists_and_not_empty(f"{config_dict['output_dir']}/metrics_{offset}.csv"):
-            print(f"Found metrics for offset {offset}")
-            continue
+            if not args.ignore_cache:
+                print(f"Found metrics for offset {offset}")
+                continue
         else:
             print(f"Evaluating split with offset {offset}")
 
@@ -386,21 +400,30 @@ if __name__ == "__main__":
             model.fit(x_train, y_train, x_val, y_val)
 
         metrics = []
+        predictions = None
+        if args.save_predictions:
+            predictions = {}
 
         with Timed("Train validation"):
             y_pred = model.predict(x_train)
             meta = {"offset": offset, "split": "train"}
             metrics.append(calculate_metrics(y_train, y_pred) | meta)
+            if predictions is not None:
+                predictions["train_pred"] = y_pred.astype(np.int8)
 
         with Timed("Validation validation"):
             y_pred = model.predict(x_val)
             meta = {"offset": offset, "split": "val"}
             metrics.append(calculate_metrics(y_val, y_pred) | meta)
+            if predictions is not None:
+                predictions["val_pred"] = y_pred.astype(np.int8)
 
         with Timed("Test validation"):
             y_pred = model.predict(x_test)
             meta = {"offset": offset, "split": "test"}
             metrics.append(calculate_metrics(y_test, y_pred) | meta)
+            if predictions is not None:
+                predictions["test_pred"] = y_pred.astype(np.int8)
 
         metrics_df = pd.DataFrame(
             data=metrics,
@@ -410,6 +433,13 @@ if __name__ == "__main__":
         )
         metrics_df.to_csv(path_manager.curr.artefacts / "metrics.csv", index=False)
         print(metrics_df)
+
+        if predictions is not None:
+            np.savez(
+                path_manager.curr.artefacts / "predictions.npz",
+                **predictions,
+            )
+            del predictions
 
         del x_train, y_train, x_val, y_val, x_test, y_test, metrics
         gc.collect()
