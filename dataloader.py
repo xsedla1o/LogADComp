@@ -124,15 +124,16 @@ class DataLoader(ABC):
         """Load the ECV representation of the dataset for loglizer models"""
         preprocessor, dataloader, drop_ids = self._parse()
 
-        xs, ys = [], []
+        xs, ys, blocks = [], [], []
         for block, sequence in dataloader.block2eventseq.items():
             xs.append([int(x) - 1 for x in sequence if x not in drop_ids])
             ys.append(dataloader.label2id[dataloader.block2label[block]])
+            blocks.append(block)
 
         xs, ys = np.asarray(xs, dtype=object), np.asarray(ys, dtype=int)
         xs = EventCounter().fit(xs).transform(xs)
 
-        np.savez_compressed(self.config["ecv_npz"], xs=xs, ys=ys)
+        np.savez_compressed(self.config["ecv_npz"], xs=xs, ys=ys, blocks=blocks)
 
         del preprocessor, dataloader
         gc.collect()
