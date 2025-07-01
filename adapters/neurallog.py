@@ -113,7 +113,7 @@ class NeuralLogAdapter(LogADCompAdapter):
         dropout: float = 0.1,
         train_batch_size: int = 256,
         train_epochs: int = 10,
-        test_batch_size: int = 1024,
+        test_batch_size: int = 256,
     ):
         """
         Args:
@@ -223,7 +223,7 @@ class NeuralLogAdapter(LogADCompAdapter):
         test_loader = BatchGenerator(x, y, batch_size)
         prediction = self._model.predict(
             test_loader,
-            workers=16,
+            workers=min(16, int(os.getenv("PBS_NCPUS", os.cpu_count()))),
             max_queue_size=32,
             verbose=1,
         )
