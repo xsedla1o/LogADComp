@@ -62,7 +62,11 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
             x_val, self.vocab.PAD, normal_only=True
         )
 
-        batch_sizes = [128, 512, 1024, 2048]
+        batch_sizes = [64, 128, 256, 512, 1024, 2048]
+        if self.num_classes > 128:
+            batch_sizes.pop()
+        if self.num_classes > 256:
+            batch_sizes.pop()
         if self.num_classes > 512:
             batch_sizes.pop()
         if self.num_classes > 1024:
@@ -284,7 +288,7 @@ class LogAnomalyAdapter(SemPCALSTMAdapter):
                 x_test, pad_token=self.vocab.PAD, dtype=torch.long
             )
 
-            loader = TorchDataLoader(dataset, batch_size=1024, shuffle=False)
+            loader = TorchDataLoader(dataset, batch_size=self.batch_size, shuffle=False)
 
             outputs = []
             for seqs, labels in loader:
