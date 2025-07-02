@@ -83,16 +83,23 @@ class LogClusterAdapter(LogADCompAdapter):
     def preprocess_split(
         x_train: NdArr, x_val: NdArr, x_test: NdArr
     ) -> Tuple[NdArr, NdArr, NdArr]:
+        norm = Normalizer(term_weighting="tf-idf")
+        x_train = norm.fit_transform(x_train)
+        x_val = norm.transform(x_val)
+        x_test = norm.transform(x_test)
         return x_train, x_val, x_test
 
     @staticmethod
     def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
         def objective(trial: optuna.Trial):
+            max_dist = trial.suggest_float("max_dist", 0.01, 0.65, step=0.01)
             model = LogClustering(
-                max_dist=trial.suggest_float("max_dist", 0.3, 0.8),
-                anomaly_threshold=trial.suggest_float("anomaly_threshold", 0.3, 0.9),
+                max_dist=max_dist,
+                anomaly_threshold=trial.suggest_float(
+                    "anomaly_threshold", max_dist, max_dist + 0.1, step=0.01
+                ),
                 num_bootstrap_samples=trial.suggest_int(
-                    "num_bootstrap_samples", 500, 5000, step=500
+                    "num_bootstrap_samples", 3000, 5000, step=500
                 ),
             )
             model.fit(x_train[y_train == 0, :])
