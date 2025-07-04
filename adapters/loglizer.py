@@ -2,6 +2,8 @@
 Author: Ondřej Sedláček <xsedla1o@stud.fit.vutbr.cz>
 """
 
+import signal
+from functools import wraps
 from typing import Tuple
 
 import optuna
@@ -68,6 +70,35 @@ class SVMAdapter(LogADCompAdapter):
         self._model.fit(x_train, y_train)
 
 
+def timeout(seconds_before_timeout):
+    """
+    Simple timeout decorator based on SaltyCrane blogpost:
+
+    https://www.saltycrane.com/blog/2010/04/using-python-timeout-decorator-uploading-s3/
+    """
+    def decorate(f):
+        def handler(signum, frame):
+            raise optuna.TrialPruned()
+
+        @wraps(f)
+        def new_f(*args, **kwargs):
+            old = signal.signal(signal.SIGALRM, handler)
+            signal.alarm(seconds_before_timeout)
+            try:
+                result = f(*args, **kwargs)
+            finally:
+                # reinstall the old signal handler
+                signal.signal(signal.SIGALRM, old)
+                # cancel the alarm
+                # this line should be inside the "finally" block (per Sam Kortchmar)
+                signal.alarm(0)
+            return result
+
+        return new_f
+
+    return decorate
+
+
 class LogClusterAdapter(LogADCompAdapter):
     """Wrapper for the loglizer LogClustering model."""
 
@@ -91,6 +122,7 @@ class LogClusterAdapter(LogADCompAdapter):
 
     @staticmethod
     def get_trial_objective(x_train, y_train, x_val, y_val, prev_params: dict = None):
+        @timeout(60 * 20)
         def objective(trial: optuna.Trial):
             max_dist = trial.suggest_float("max_dist", 0.01, 0.65, step=0.01)
             model = LogClustering(
