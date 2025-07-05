@@ -1,1 +1,1 @@
-{"max_dist": 0.04, "anomaly_threshold": 0.06, "num_bootstrap_samples": 3000}
+{"max_dist": 0.01, "anomaly_threshold": 0.060000000000000005, "num_bootstrap_samples": 3500}
